@@ -33,7 +33,7 @@ const schema = z.object({
 
 function RegisterForm() {
   const router = useRouter();
-  const { register: registerUser } = useAuth();
+  const { register: registerUser, login } = useAuth();
   const { toast } = useToast();
   const [submitting, setSubmitting] = useState(false);
 
@@ -46,10 +46,26 @@ function RegisterForm() {
   async function onSubmit(values) {
     setSubmitting(true);
     try {
-      await registerUser({ name: values.name, email: values.email, password: values.password });
-      trackSignUp({ method: 'password' });
-      toast({ variant: 'success', title: 'Account created', description: 'You can now log in.' });
-      router.push('/login');
+      await registerUser({
+  name: values.name,
+  email: values.email,
+  password: values.password,
+});
+
+await login({
+  email: values.email,
+  password: values.password,
+});
+
+trackSignUp({ method: 'password' });
+
+toast({
+  variant: 'success',
+  title: 'Account created',
+  description: 'Welcome to FlightOptimizer!',
+});
+
+router.push('/search');
     } catch (err) {
       const message = err instanceof ApiError ? err.message : 'Something went wrong. Please try again.';
       toast({ variant: 'error', title: 'Registration failed', description: message });
