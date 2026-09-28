@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-paper text-ink-900 font-body antialiased;
+  }
+
+  /* Visible keyboard focus everywhere — never remove outline without replacing it */
+  :focus-visible {
+    @apply outline-none ring-2 ring-horizon-500 ring-offset-2 ring-offset-paper;
+  }
+
+  ::selection {
+    @apply bg-amber-200 text-ink-900;
+  }
+
+  h1, h2, h3, h4 {
+    @apply font-display text-ink-900;
+  }
+}
+
+@layer utilities {
+  /*
+   * Site-wide content container. Previously capped at max-w-[100rem]
+   * (1600px), which still left large empty margins on wide desktop/
+   * ultrawide monitors and read as "not full width". Now full-bleed
+   * (no max-width cap) — content stretches to fill the viewport, with
+   * padding that scales up at each breakpoint so it never touches the
+   * screen edge and stays readable on very wide monitors.
+   */
+  .container-page {
+    @apply mx-auto w-full px-4 sm:px-6 md:px-8 lg:px-12 xl:px-16 2xl:px-24;
+  }
+
+  /*
+   * Wider variant used only by the three homepage sections (How It Works,
+   * Features, Meet Shreya AI) that need to visually read as full-width —
+   * viewport-relative gutters on desktop (~5-6vw) rather than
+   * .container-page's fixed-px desktop padding, so the inner content keeps
+   * using ~90%+ of the viewport as screens get wider instead of the ratio
+   * drifting. Intentionally separate from .container-page so Hero, Navbar,
+   * Pricing, FAQ and Footer are unaffected.
+   */
+  .section-wide {
+    @apply mx-auto w-full px-4 sm:px-6 md:px-10 lg:px-[5vw] 2xl:px-[6vw];
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Respect reduced-motion preference: disable decorative animation */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

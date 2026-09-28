@@ -1,0 +1,202 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: flight-optimizer-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: flight_optimizer
+    ports:
+      # Host-side port only — changed to avoid clashing with another local
+      # Postgres instance. The internal Docker network port (right side)
+      # stays 5432; backend/migrate keep using postgres:5432 in DATABASE_URL.
+      - '5433:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Optional. Accelerates the flight cache across backend instances.
+  # The backend runs fine without this — REDIS_URL just needs to stay unset
+  # (or this service commented out) to fall back to Postgres + in-memory
+  # caching only.
+  redis:
+    image: redis:7-alpine
+    container_name: flight-optimizer-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-off: `docker compose run --rm migrate` applies schema.sql.
+  # Not part of the default `up` — migrations should be a deliberate step.
+  migrate:
+    build: ./backend
+    profiles: ['tools']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Mirrors the backend service's production config (config/env.js
+      # requires JWT_ACCESS_SECRET/JWT_REFRESH_SECRET when NODE_ENV=production
+      # and throws otherwise) — migrate.js pulls in database/pool.js, which
+      # loads that same config module, so it needs these to start at all.
+      # Placeholders only; never real production secrets.
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/flight_optimizer
+      JWT_ACCESS_SECRET: change_me_access_secret
+      JWT_REFRESH_SECRET: change_me_refresh_secret
+    command: ['npm', 'run', 'migrate']
+
+  # Dedicated test runner. Not part of the default `up` — invoked explicitly
+  # with `docker compose --profile test run --rm backend-test [command]`.
+  #
+  # Why this exists: the production `backend` image is built with
+  # `npm ci --omit=dev`, so Jest/supertest/eslint aren't installed there —
+  # and shouldn't be, that's deliberate for a lean prod image. This service
+  # builds from the Dockerfile's separate `test` stage instead, which installs
+  # full devDependencies without touching the production `deps`/`runner`
+  # stages at all.
+  #
+  # It also fixes the actual root cause of "password authentication failed
+  # for user postgres" from Windows/Node: that error came from connecting to
+  # localhost:5433, which is only the HOST-side port mapping for convenience
+  # (see the postgres service's `ports` comment above) — it is not reachable
+  # the same way from inside a container on this Compose network. Containers
+  # on this network reach Postgres at its service name and container port,
+  # postgres:5432, which is what DATABASE_URL below uses. (backend/.env.test's
+  # own localhost:5433 default is left as-is for host-side `npm test` runs
+  # outside Docker — dotenv never overrides an already-set env var, so the
+  # DATABASE_URL set here always wins for this container.)
+  #
+  # The backend source (src/, tests/, jest.config.js, .env.test, schema.sql)
+  # is bind-mounted in fresh from the host on every run, so test edits are
+  # picked up without a rebuild. The node_modules installed in the `test`
+  # image stage are preserved via a separate named volume so the bind mount
+  # doesn't shadow them with an empty/host directory.
+  backend-test:
+    build:
+      context: ./backend
+      target: test
+    container_name: flight-optimizer-backend-test
+    profiles: ['test']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - backend_test_node_modules:/app/node_modules
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/flight_optimizer_test
+      PG_SSL: 'false'
+      JWT_ACCESS_SECRET: test_access_secret
+      JWT_REFRESH_SECRET: test_refresh_secret
+      JWT_ACCESS_EXPIRES: 15m
+      JWT_REFRESH_EXPIRES: 30d
+      FLIGHT_PROVIDER: mock
+      MAX_NEARBY_AIRPORTS: 3
+      MAX_DATE_FLEX_DAYS: 3
+      MAX_PERMUTATIONS: 500
+      MAX_COUNTRIES_PER_TRIP: 4
+      FLIGHT_CACHE_TTL_MINUTES: 20
+      STATIC_CACHE_TTL_HOURS: 24
+      SENTRY_DSN: ''
+      SENTRY_ENABLED: 'false'
+      GOOGLE_CLIENT_ID: test_google_client_id
+      GOOGLE_CLIENT_SECRET: test_google_client_secret
+      GOOGLE_CALLBACK_URL: http://localhost:5000/api/auth/google/callback
+      RAZORPAY_KEY_ID: rzp_test_fake_key_id
+      RAZORPAY_KEY_SECRET: test_fake_razorpay_key_secret
+      RAZORPAY_WEBHOOK_SECRET: test_fake_razorpay_webhook_secret
+      AI_PROVIDER: gemini
+      GEMINI_API_KEY: test_fake_gemini_key_1234
+      ANTHROPIC_API_KEY: test_fake_anthropic_key_1234
+    command: ['npm', 'test']
+
+  backend:
+    build: ./backend
+    container_name: flight-optimizer-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # Redis is an optional accelerator (see redisClient.js/config/env.js —
+      # the backend runs fine on Postgres/in-memory cache alone). Waiting on
+      # service_healthy here made Redis effectively mandatory at the Docker
+      # level: if its healthcheck ever failed, the backend container would
+      # never start even though the app code itself tolerates that fine.
+      # service_started only waits for the container to launch, matching the
+      # app's actual optional-Redis design.
+      redis:
+        condition: service_started
+    ports:
+      - '5000:5000'
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      FRONTEND_URL: http://localhost:3000
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/flight_optimizer
+      PG_SSL: 'false'
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-change_me_access_secret}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change_me_refresh_secret}
+      JWT_ACCESS_EXPIRES: 15m
+      JWT_REFRESH_EXPIRES: 30d
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:-http://localhost:5000/api/auth/google/callback}
+      FLIGHT_PROVIDER: ignav
+      AMADEUS_CLIENT_ID: ${AMADEUS_CLIENT_ID:-}
+      AMADEUS_CLIENT_SECRET: ${AMADEUS_CLIENT_SECRET:-}
+      IGNAV_API_KEY: ${IGNAV_API_KEY:-}
+      IGNAV_BASE_URL: ${IGNAV_BASE_URL:-https://ignav.com/api}
+      IGNAV_MARKET: ${IGNAV_MARKET:-IN}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY:-}
+      GOOGLE_PLACES_API_KEY: ${GOOGLE_PLACES_API_KEY:-}
+      PLACES_CACHE_TTL_HOURS: ${PLACES_CACHE_TTL_HOURS:-24}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      MAX_NEARBY_AIRPORTS: 3
+      MAX_DATE_FLEX_DAYS: 3
+      MAX_PERMUTATIONS: 500
+      MAX_COUNTRIES_PER_TRIP: 4
+      FLIGHT_CACHE_TTL_MINUTES: 20
+      STATIC_CACHE_TTL_HOURS: 24
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:5000/api}
+        NEXT_PUBLIC_MAPBOX_TOKEN: ${NEXT_PUBLIC_MAPBOX_TOKEN:-}
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+        NEXT_PUBLIC_GA_MEASUREMENT_ID: ${NEXT_PUBLIC_GA_MEASUREMENT_ID:-}
+    container_name: flight-optimizer-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - '3000:3000'
+
+volumes:
+  postgres_data:
+  redis_data:
+  backend_test_node_modules:
