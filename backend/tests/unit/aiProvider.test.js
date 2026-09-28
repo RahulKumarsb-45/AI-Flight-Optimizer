@@ -1,267 +1,937 @@
 /**
- * Unit tests for the Q3 AI Chat Agent's provider layer:
- *   services/aiProvider/geminiProvider.js
+ * Unit tests for the AI Chat Agent's provider layer:
+ *   services/aiProvider/groqProvider.js
  *   services/aiProvider/anthropicProvider.js
  *   services/aiProvider/aiProviderFactory.js
  *
- * These call the REAL provider modules directly (no HTTP layer, no
- * database) and mock only `axios`, which is the exact boundary each
- * provider uses to reach the external AI API. No real API key or network
- * call is ever used. This lets the provider-level error handling
- * (malformed output, empty output, missing config, timeouts/network
- * failures) be exercised deterministically and without a live DB.
- *
- * Kept separate from tests/integration/aiAgent.test.js (which exercises
- * the full HTTP route -> controller -> service stack) so provider-level
- * behavior can be verified even in environments without Postgres.
+ * These tests call the REAL provider modules directly.
+ * Only axios is mocked, so no real API key or network call is used.
  */
 
 jest.mock('axios');
+
 const axios = require('axios');
 
 const config = require('../../src/config/env');
-const geminiProvider = require('../../src/services/aiProvider/geminiProvider');
+const groqProvider = require('../../src/services/aiProvider/groqProvider');
 const anthropicProvider = require('../../src/services/aiProvider/anthropicProvider');
 const aiProviderFactory = require('../../src/services/aiProvider/aiProviderFactory');
 
-const ORIGINAL_AI_CONFIG = JSON.parse(JSON.stringify(config.ai));
+const ORIGINAL_AI_CONFIG = JSON.parse(
+  JSON.stringify(config.ai)
+);
+
+beforeAll(() => {
+  /*
+   * axios is fully mocked by Jest.
+   * The providers use axios.isAxiosError() to distinguish
+   * provider/network errors from normal application errors.
+   */
+  axios.isAxiosError.mockImplementation(
+    (error) => !!error?.isAxiosError
+  );
+});
 
 afterEach(() => {
   jest.clearAllMocks();
-  // Deep-restore so a mutation in one test (e.g. clearing an apiKey) never
-  // leaks into the next test.
+
+  /*
+   * Restore AI configuration after every test so one test
+   * cannot affect another.
+   */
   config.ai.provider = ORIGINAL_AI_CONFIG.provider;
-  config.ai.gemini = { ...ORIGINAL_AI_CONFIG.gemini };
-  config.ai.anthropic = { ...ORIGINAL_AI_CONFIG.anthropic };
+
+  config.ai.groq = {
+    ...ORIGINAL_AI_CONFIG.groq,
+  };
+
+  config.ai.anthropic = {
+    ...ORIGINAL_AI_CONFIG.anthropic,
+  };
 });
 
-function geminiSuccessResponse({ reply = 'Sure, where are you flying from?', extractedParams = null } = {}) {
+/**
+ * ------------------------------------------------------------
+ * Mock response helpers
+ * ------------------------------------------------------------
+ */
+
+function groqSuccessResponse({
+  reply = 'Sure, where are you flying from?',
+  extractedParams = {},
+} = {}) {
   return {
     data: {
-      candidates: [
+      choices: [
         {
-          finishReason: 'STOP',
-          content: { parts: [{ text: JSON.stringify({ reply, extractedParams }) }] },
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: JSON.stringify({
+              reply,
+              extractedParams,
+            }),
+          },
+          finish_reason: 'stop',
         },
       ],
     },
   };
 }
 
-function anthropicSuccessResponse({ reply = 'Sure, where are you flying from?', extractedParams = null } = {}) {
+function anthropicSuccessResponse({
+  reply = 'Sure, where are you flying from?',
+  extractedParams = {},
+} = {}) {
   return {
     data: {
-      content: [{ type: 'text', text: JSON.stringify({ reply, extractedParams }) }],
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            reply,
+            extractedParams,
+          }),
+        },
+      ],
     },
   };
 }
 
-// ---------------------------------------------------------------------
-// aiProviderFactory
-// ---------------------------------------------------------------------
+function createAxiosError({
+  status,
+  message = 'Request failed',
+  data = {},
+} = {}) {
+  const error = new Error(message);
+
+  error.isAxiosError = true;
+
+  error.response = {
+    status,
+    data,
+  };
+
+  return error;
+}
+
+/**
+ * ============================================================
+ * aiProviderFactory
+ * ============================================================
+ */
+
 describe('aiProviderFactory.getProvider', () => {
-  test('returns the gemini provider module for "gemini"', () => {
-    expect(aiProviderFactory.getProvider('gemini')).toBe(geminiProvider);
+  test('returns the Groq provider module for "groq"', () => {
+    expect(
+      aiProviderFactory.getProvider('groq')
+    ).toBe(groqProvider);
   });
 
-  test('returns the anthropic provider module for "anthropic"', () => {
-    expect(aiProviderFactory.getProvider('anthropic')).toBe(anthropicProvider);
+  test('returns the Anthropic provider module for "anthropic"', () => {
+    expect(
+      aiProviderFactory.getProvider('anthropic')
+    ).toBe(anthropicProvider);
   });
 
-  test('falls back to gemini for an unknown/misconfigured provider name', () => {
-    expect(aiProviderFactory.getProvider('some-unknown-provider')).toBe(geminiProvider);
+  test('throws for an unknown provider name', () => {
+    expect(() =>
+      aiProviderFactory.getProvider(
+        'some-unknown-provider'
+      )
+    ).toThrow(
+      'Unsupported AI provider: some-unknown-provider'
+    );
   });
 
   test('defaults to config.ai.provider when no name is passed', () => {
+    config.ai.provider = 'groq';
+
+    expect(
+      aiProviderFactory.getProvider()
+    ).toBe(groqProvider);
+
     config.ai.provider = 'anthropic';
-    expect(aiProviderFactory.getProvider()).toBe(anthropicProvider);
+
+    expect(
+      aiProviderFactory.getProvider()
+    ).toBe(anthropicProvider);
   });
 });
 
-// ---------------------------------------------------------------------
-// geminiProvider.generateChatReply
-// ---------------------------------------------------------------------
-describe('geminiProvider.generateChatReply', () => {
-  test('fails closed (AI_NOT_CONFIGURED, 500) when GEMINI_API_KEY is missing, and never calls the network', async () => {
-    config.ai.gemini.apiKey = undefined;
+/**
+ * ============================================================
+ * groqProvider.generateChatReply
+ * ============================================================
+ */
 
-    await expect(geminiProvider.generateChatReply({ userMessage: 'hi' })).rejects.toMatchObject({
-      errorCode: 'AI_NOT_CONFIGURED',
-      statusCode: 500,
-    });
-    expect(axios.post).not.toHaveBeenCalled();
-  });
+describe('groqProvider.generateChatReply', () => {
+  test(
+    'fails closed (AI_NOT_CONFIGURED, 500) when GROQ_API_KEY is missing, and never calls the network',
+    async () => {
+      config.ai.groq.apiKey = undefined;
 
-  test('returns the parsed reply and extractedParams on a well-formed provider response', async () => {
-    config.ai.gemini.apiKey = 'fake-test-gemini-key';
-    const extractedParams = { originCity: 'Delhi', destinationCountries: ['Japan'], readyToSearch: false };
-    axios.post.mockResolvedValueOnce(geminiSuccessResponse({ reply: 'Great, where to?', extractedParams }));
+      await expect(
+        groqProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode: 'AI_NOT_CONFIGURED',
+        statusCode: 500,
+      });
 
-    const result = await geminiProvider.generateChatReply({ history: [], userMessage: 'I want to visit Japan' });
+      expect(axios.post).not.toHaveBeenCalled();
+    }
+  );
 
-    expect(result).toEqual({ reply: 'Great, where to?', extractedParams });
-  });
+  test(
+    'returns the parsed reply and extractedParams on a well-formed Groq response',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
 
-  test('sends the configured model, API key, and the new user message to the correct Gemini endpoint', async () => {
-    config.ai.gemini.apiKey = 'fake-test-gemini-key';
-    config.ai.gemini.model = 'gemini-test-model';
-    axios.post.mockResolvedValueOnce(geminiSuccessResponse());
+      const extractedParams = {
+        originCity: 'Delhi',
+        destinationCountries: ['Japan'],
+        departureDate: null,
+        returnDate: null,
+        dateFlexible: false,
+        travelers: null,
+        budgetInr: null,
+        preference: null,
+        readyToSearch: false,
+      };
 
-    await geminiProvider.generateChatReply({
-      history: [{ role: 'user', content: 'earlier message' }],
-      userMessage: 'new message',
-    });
+      axios.post.mockResolvedValueOnce(
+        groqSuccessResponse({
+          reply: 'Great, where are you flying from?',
+          extractedParams,
+        })
+      );
 
-    expect(axios.post).toHaveBeenCalledTimes(1);
-    const [url, body] = axios.post.mock.calls[0];
-    expect(url).toBe(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-test-model:generateContent?key=fake-test-gemini-key'
-    );
-    expect(body.contents[body.contents.length - 1]).toEqual({ role: 'user', parts: [{ text: 'new message' }] });
-  });
+      const result =
+        await groqProvider.generateChatReply({
+          history: [],
+          userMessage:
+            'I want to visit Japan',
+        });
 
-  test('never includes the raw API key in the request body (only in the URL, per current implementation)', async () => {
-    config.ai.gemini.apiKey = 'fake-test-gemini-key';
-    axios.post.mockResolvedValueOnce(geminiSuccessResponse());
+      expect(result).toEqual({
+        reply:
+          'Great, where are you flying from?',
+        extractedParams,
+      });
+    }
+  );
 
-    await geminiProvider.generateChatReply({ userMessage: 'hi' });
+  test(
+    'sends the configured model, Groq API key, history, and new user message to the correct endpoint',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
 
-    const [, body] = axios.post.mock.calls[0];
-    expect(JSON.stringify(body)).not.toContain('fake-test-gemini-key');
-  });
+      config.ai.groq.model =
+        'openai/gpt-oss-120b';
 
-  test('throws AI_PROVIDER_ERROR (502) when the provider response has no candidates/text and was not safety-blocked', async () => {
-    config.ai.gemini.apiKey = 'fake-test-gemini-key';
-    axios.post.mockResolvedValueOnce({ data: { candidates: [] } });
+      axios.post.mockResolvedValueOnce(
+        groqSuccessResponse()
+      );
 
-    await expect(geminiProvider.generateChatReply({ userMessage: 'hi' })).rejects.toMatchObject({
-      errorCode: 'AI_PROVIDER_ERROR',
-      statusCode: 502,
-    });
-  });
+      await groqProvider.generateChatReply({
+        history: [
+          {
+            role: 'user',
+            content: 'I want to travel to Japan',
+          },
+          {
+            role: 'assistant',
+            content: 'Sure, when would you like to go?',
+          },
+        ],
+        userMessage: 'Next month',
+      });
 
-  test('throws AI_SAFETY_BLOCKED (400) when Gemini returns no text with finishReason SAFETY', async () => {
-    config.ai.gemini.apiKey = 'fake-test-gemini-key';
-    axios.post.mockResolvedValueOnce({ data: { candidates: [{ finishReason: 'SAFETY', content: undefined }] } });
+      expect(axios.post).toHaveBeenCalledTimes(1);
 
-    await expect(geminiProvider.generateChatReply({ userMessage: 'anything' })).rejects.toMatchObject({
-      errorCode: 'AI_SAFETY_BLOCKED',
-      statusCode: 400,
-    });
-  });
+      const [
+        url,
+        body,
+        options,
+      ] = axios.post.mock.calls[0];
 
-  test('throws AI_PROVIDER_ERROR (502) when the returned text is not valid JSON', async () => {
-    config.ai.gemini.apiKey = 'fake-test-gemini-key';
-    axios.post.mockResolvedValueOnce({
-      data: { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'not json at all' }] } }] },
-    });
+      expect(url).toBe(
+        'https://api.groq.com/openai/v1/chat/completions'
+      );
 
-    await expect(geminiProvider.generateChatReply({ userMessage: 'hi' })).rejects.toMatchObject({
-      errorCode: 'AI_PROVIDER_ERROR',
-      statusCode: 502,
-    });
-  });
+      expect(body.model).toBe(
+        'openai/gpt-oss-120b'
+      );
 
-  test('propagates the raw axios error as-is on timeout (current code does not catch/wrap network errors)', async () => {
-    config.ai.gemini.apiKey = 'fake-test-gemini-key';
-    const timeoutError = new Error('timeout of 20000ms exceeded');
-    timeoutError.code = 'ECONNABORTED';
-    axios.post.mockRejectedValueOnce(timeoutError);
+      expect(body.messages).toEqual([
+        {
+          role: 'system',
+          content: expect.any(String),
+        },
+        {
+          role: 'user',
+          content:
+            'I want to travel to Japan',
+        },
+        {
+          role: 'assistant',
+          content:
+            'Sure, when would you like to go?',
+        },
+        {
+          role: 'user',
+          content: 'Next month',
+        },
+      ]);
 
-    await expect(geminiProvider.generateChatReply({ userMessage: 'hi' })).rejects.toBe(timeoutError);
-  });
+      expect(
+        body.response_format
+      ).toEqual({
+        type: 'json_schema',
+        json_schema: {
+          name:
+            'flight_optimizer_response',
+          strict: true,
+          schema:
+            expect.objectContaining({
+              type: 'object',
+              required: [
+                'reply',
+                'extractedParams',
+              ],
+            }),
+        },
+      });
 
-  test('propagates the raw axios error as-is on an HTTP error status from the provider (e.g. rate limit)', async () => {
-    config.ai.gemini.apiKey = 'fake-test-gemini-key';
-    const rateLimitError = new Error('Request failed with status code 429');
-    rateLimitError.response = { status: 429, data: { error: { message: 'rate limited' } } };
-    axios.post.mockRejectedValueOnce(rateLimitError);
+      expect(
+        body.reasoning_effort
+      ).toBe('medium');
 
-    await expect(geminiProvider.generateChatReply({ userMessage: 'hi' })).rejects.toBe(rateLimitError);
-  });
+      expect(
+        body.max_completion_tokens
+      ).toBe(2048);
+
+      expect(
+        options.headers.Authorization
+      ).toBe(
+        'Bearer fake-test-groq-key'
+      );
+
+      expect(
+        options.headers['Content-Type']
+      ).toBe('application/json');
+    }
+  );
+
+  test(
+    'never includes the raw API key in the request body',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-secret-key';
+
+      axios.post.mockResolvedValueOnce(
+        groqSuccessResponse()
+      );
+
+      await groqProvider.generateChatReply({
+        userMessage: 'hi',
+      });
+
+      const [
+        ,
+        body,
+      ] = axios.post.mock.calls[0];
+
+      expect(
+        JSON.stringify(body)
+      ).not.toContain(
+        'fake-test-groq-secret-key'
+      );
+    }
+  );
+
+  test(
+    'throws AI_PROVIDER_ERROR (502) when the provider response has no usable content',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
+
+      axios.post.mockResolvedValueOnce({
+        data: {
+          choices: [],
+        },
+      });
+
+      await expect(
+        groqProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_PROVIDER_ERROR',
+        statusCode: 502,
+      });
+    }
+  );
+
+  test(
+    'throws AI_PROVIDER_ERROR (502) when Groq returns invalid JSON',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
+
+      axios.post.mockResolvedValueOnce({
+        data: {
+          choices: [
+            {
+              message: {
+                content:
+                  'this is not valid JSON',
+              },
+            },
+          ],
+        },
+      });
+
+      await expect(
+        groqProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_PROVIDER_ERROR',
+        statusCode: 502,
+      });
+    }
+  );
+
+  test(
+    'throws AI_PROVIDER_ERROR (502) when Groq returns an invalid response structure',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
+
+      axios.post.mockResolvedValueOnce({
+        data: {
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  invalid: true,
+                }),
+              },
+            },
+          ],
+        },
+      });
+
+      await expect(
+        groqProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_PROVIDER_ERROR',
+        statusCode: 502,
+      });
+    }
+  );
+
+  test(
+    'preserves a normal non-Axios network error',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
+
+      const timeoutError = new Error(
+        'timeout of 30000ms exceeded'
+      );
+
+      timeoutError.code =
+        'ECONNABORTED';
+
+      axios.post.mockRejectedValueOnce(
+        timeoutError
+      );
+
+      await expect(
+        groqProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toBe(timeoutError);
+    }
+  );
+
+  test(
+    'wraps Groq 400 errors as AI_PROVIDER_ERROR',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
+
+      const error = createAxiosError({
+        status: 400,
+        message:
+          'Request failed with status code 400',
+        data: {
+          error: {
+            message:
+              'Invalid request',
+          },
+        },
+      });
+
+      axios.post.mockRejectedValueOnce(
+        error
+      );
+
+      await expect(
+        groqProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_PROVIDER_ERROR',
+        statusCode: 502,
+        message:
+          'Groq rejected the request: Invalid request',
+      });
+    }
+  );
+
+  test(
+    'wraps Groq 401 authentication errors',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
+
+      const error = createAxiosError({
+        status: 401,
+        data: {
+          error: {
+            message:
+              'Invalid API key',
+          },
+        },
+      });
+
+      axios.post.mockRejectedValueOnce(
+        error
+      );
+
+      await expect(
+        groqProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_PROVIDER_ERROR',
+        statusCode: 502,
+        message:
+          'Groq API authentication failed. Check GROQ_API_KEY.',
+      });
+    }
+  );
+
+  test(
+    'wraps Groq 403 authorization errors',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
+
+      const error = createAxiosError({
+        status: 403,
+        data: {
+          error: {
+            message:
+              'Forbidden',
+          },
+        },
+      });
+
+      axios.post.mockRejectedValueOnce(
+        error
+      );
+
+      await expect(
+        groqProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_PROVIDER_ERROR',
+        statusCode: 502,
+      });
+    }
+  );
+
+  test(
+    'wraps Groq 429 errors as AI_RATE_LIMITED',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
+
+      const error = createAxiosError({
+        status: 429,
+        data: {
+          error: {
+            message:
+              'Rate limit reached',
+          },
+        },
+      });
+
+      axios.post.mockRejectedValueOnce(
+        error
+      );
+
+      await expect(
+        groqProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_RATE_LIMITED',
+        statusCode: 429,
+      });
+    }
+  );
+
+  test(
+    'wraps Groq 500 errors as AI_PROVIDER_UNAVAILABLE',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
+
+      const error = createAxiosError({
+        status: 500,
+        data: {
+          error: {
+            message:
+              'Internal server error',
+          },
+        },
+      });
+
+      axios.post.mockRejectedValueOnce(
+        error
+      );
+
+      await expect(
+        groqProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_PROVIDER_UNAVAILABLE',
+        statusCode: 503,
+      });
+    }
+  );
+
+  test(
+    'wraps Groq 502 errors as AI_PROVIDER_UNAVAILABLE',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
+
+      const error = createAxiosError({
+        status: 502,
+      });
+
+      axios.post.mockRejectedValueOnce(
+        error
+      );
+
+      await expect(
+        groqProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_PROVIDER_UNAVAILABLE',
+        statusCode: 503,
+      });
+    }
+  );
+
+  test(
+    'wraps Groq 503 errors as AI_PROVIDER_UNAVAILABLE',
+    async () => {
+      config.ai.groq.apiKey =
+        'fake-test-groq-key';
+
+      const error = createAxiosError({
+        status: 503,
+      });
+
+      axios.post.mockRejectedValueOnce(
+        error
+      );
+
+      await expect(
+        groqProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_PROVIDER_UNAVAILABLE',
+        statusCode: 503,
+      });
+    }
+  );
 });
 
-// ---------------------------------------------------------------------
-// anthropicProvider.generateChatReply
-// ---------------------------------------------------------------------
+/**
+ * ============================================================
+ * anthropicProvider.generateChatReply
+ * ============================================================
+ */
+
 describe('anthropicProvider.generateChatReply', () => {
-  test('fails closed (AI_NOT_CONFIGURED, 500) when ANTHROPIC_API_KEY is missing, and never calls the network', async () => {
-    config.ai.anthropic.apiKey = undefined;
+  test(
+    'fails closed (AI_NOT_CONFIGURED, 500) when ANTHROPIC_API_KEY is missing, and never calls the network',
+    async () => {
+      config.ai.anthropic.apiKey =
+        undefined;
 
-    await expect(anthropicProvider.generateChatReply({ userMessage: 'hi' })).rejects.toMatchObject({
-      errorCode: 'AI_NOT_CONFIGURED',
-      statusCode: 500,
-    });
-    expect(axios.post).not.toHaveBeenCalled();
-  });
+      await expect(
+        anthropicProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_NOT_CONFIGURED',
+        statusCode: 500,
+      });
 
-  test('returns the parsed reply and extractedParams on a well-formed provider response', async () => {
-    config.ai.anthropic.apiKey = 'fake-test-anthropic-key';
-    const extractedParams = { originCity: 'Mumbai', destinationCountries: [], readyToSearch: false };
-    axios.post.mockResolvedValueOnce(anthropicSuccessResponse({ reply: 'When would you like to travel?', extractedParams }));
+      expect(
+        axios.post
+      ).not.toHaveBeenCalled();
+    }
+  );
 
-    const result = await anthropicProvider.generateChatReply({ history: [], userMessage: 'I want a trip' });
+  test(
+    'returns the parsed reply and extractedParams on a well-formed provider response',
+    async () => {
+      config.ai.anthropic.apiKey =
+        'fake-test-anthropic-key';
 
-    expect(result).toEqual({ reply: 'When would you like to travel?', extractedParams });
-  });
+      const extractedParams = {
+        originCity: 'Mumbai',
+        destinationCountries: [],
+        readyToSearch: false,
+      };
 
-  test('sends the API key only in the x-api-key header, never in the request body or URL', async () => {
-    config.ai.anthropic.apiKey = 'fake-test-anthropic-key';
-    axios.post.mockResolvedValueOnce(anthropicSuccessResponse());
+      axios.post.mockResolvedValueOnce(
+        anthropicSuccessResponse({
+          reply:
+            'When would you like to travel?',
+          extractedParams,
+        })
+      );
 
-    await anthropicProvider.generateChatReply({ userMessage: 'hi' });
+      const result =
+        await anthropicProvider.generateChatReply({
+          history: [],
+          userMessage:
+            'I want a trip',
+        });
 
-    const [url, body, options] = axios.post.mock.calls[0];
-    expect(url).toBe('https://api.anthropic.com/v1/messages');
-    expect(JSON.stringify(body)).not.toContain('fake-test-anthropic-key');
-    expect(options.headers['x-api-key']).toBe('fake-test-anthropic-key');
-  });
+      expect(result).toEqual({
+        reply:
+          'When would you like to travel?',
+        extractedParams,
+      });
+    }
+  );
 
-  test('strips a ```json code fence before parsing, if present', async () => {
-    config.ai.anthropic.apiKey = 'fake-test-anthropic-key';
-    const payload = JSON.stringify({ reply: 'ok', extractedParams: null });
-    axios.post.mockResolvedValueOnce({ data: { content: [{ type: 'text', text: '```json\n' + payload + '\n```' }] } });
+  test(
+    'sends the API key only in the x-api-key header, never in the request body or URL',
+    async () => {
+      config.ai.anthropic.apiKey =
+        'fake-test-anthropic-key';
 
-    const result = await anthropicProvider.generateChatReply({ userMessage: 'hi' });
+      axios.post.mockResolvedValueOnce(
+        anthropicSuccessResponse()
+      );
 
-    expect(result).toEqual({ reply: 'ok', extractedParams: null });
-  });
+      await anthropicProvider.generateChatReply({
+        userMessage: 'hi',
+      });
 
-  test('throws AI_PROVIDER_ERROR (502) when the response has no text content', async () => {
-    config.ai.anthropic.apiKey = 'fake-test-anthropic-key';
-    axios.post.mockResolvedValueOnce({ data: { content: [] } });
+      const [
+        url,
+        body,
+        options,
+      ] = axios.post.mock.calls[0];
 
-    await expect(anthropicProvider.generateChatReply({ userMessage: 'hi' })).rejects.toMatchObject({
-      errorCode: 'AI_PROVIDER_ERROR',
-      statusCode: 502,
-    });
-  });
+      expect(url).toBe(
+        'https://api.anthropic.com/v1/messages'
+      );
 
-  test('throws AI_PROVIDER_ERROR (502) when the returned text is not valid JSON', async () => {
-    config.ai.anthropic.apiKey = 'fake-test-anthropic-key';
-    axios.post.mockResolvedValueOnce({ data: { content: [{ type: 'text', text: 'definitely not json' }] } });
+      expect(
+        JSON.stringify(body)
+      ).not.toContain(
+        'fake-test-anthropic-key'
+      );
 
-    await expect(anthropicProvider.generateChatReply({ userMessage: 'hi' })).rejects.toMatchObject({
-      errorCode: 'AI_PROVIDER_ERROR',
-      statusCode: 502,
-    });
-  });
+      expect(
+        options.headers['x-api-key']
+      ).toBe(
+        'fake-test-anthropic-key'
+      );
+    }
+  );
 
-  test('propagates the raw axios error as-is on timeout (current code does not catch/wrap network errors)', async () => {
-    config.ai.anthropic.apiKey = 'fake-test-anthropic-key';
-    const timeoutError = new Error('timeout of 20000ms exceeded');
-    timeoutError.code = 'ECONNABORTED';
-    axios.post.mockRejectedValueOnce(timeoutError);
+  test(
+    'strips a ```json code fence before parsing, if present',
+    async () => {
+      config.ai.anthropic.apiKey =
+        'fake-test-anthropic-key';
 
-    await expect(anthropicProvider.generateChatReply({ userMessage: 'hi' })).rejects.toBe(timeoutError);
-  });
+      const payload = JSON.stringify({
+        reply: 'ok',
+        extractedParams: null,
+      });
 
-  test('propagates the raw axios error as-is on an HTTP error status from the provider (e.g. invalid key / auth failure)', async () => {
-    config.ai.anthropic.apiKey = 'fake-test-anthropic-key';
-    const authError = new Error('Request failed with status code 401');
-    authError.response = { status: 401, data: { error: { message: 'invalid x-api-key' } } };
-    axios.post.mockRejectedValueOnce(authError);
+      axios.post.mockResolvedValueOnce({
+        data: {
+          content: [
+            {
+              type: 'text',
+              text:
+                '```json\n' +
+                payload +
+                '\n```',
+            },
+          ],
+        },
+      });
 
-    await expect(anthropicProvider.generateChatReply({ userMessage: 'hi' })).rejects.toBe(authError);
-  });
+      const result =
+        await anthropicProvider.generateChatReply({
+          userMessage: 'hi',
+        });
+
+      expect(result).toEqual({
+        reply: 'ok',
+        extractedParams: null,
+      });
+    }
+  );
+
+  test(
+    'throws AI_PROVIDER_ERROR (502) when the response has no text content',
+    async () => {
+      config.ai.anthropic.apiKey =
+        'fake-test-anthropic-key';
+
+      axios.post.mockResolvedValueOnce({
+        data: {
+          content: [],
+        },
+      });
+
+      await expect(
+        anthropicProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_PROVIDER_ERROR',
+        statusCode: 502,
+      });
+    }
+  );
+
+  test(
+    'throws AI_PROVIDER_ERROR (502) when the returned text is not valid JSON',
+    async () => {
+      config.ai.anthropic.apiKey =
+        'fake-test-anthropic-key';
+
+      axios.post.mockResolvedValueOnce({
+        data: {
+          content: [
+            {
+              type: 'text',
+              text:
+                'definitely not json',
+            },
+          ],
+        },
+      });
+
+      await expect(
+        anthropicProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toMatchObject({
+        errorCode:
+          'AI_PROVIDER_ERROR',
+        statusCode: 502,
+      });
+    }
+  );
+
+  test(
+    'propagates the raw axios error as-is on timeout',
+    async () => {
+      config.ai.anthropic.apiKey =
+        'fake-test-anthropic-key';
+
+      const timeoutError = new Error(
+        'timeout of 20000ms exceeded'
+      );
+
+      timeoutError.code =
+        'ECONNABORTED';
+
+      axios.post.mockRejectedValueOnce(
+        timeoutError
+      );
+
+      await expect(
+        anthropicProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toBe(timeoutError);
+    }
+  );
+
+  test(
+    'propagates the raw axios error as-is on an HTTP error status',
+    async () => {
+      config.ai.anthropic.apiKey =
+        'fake-test-anthropic-key';
+
+      const authError = new Error(
+        'Request failed with status code 401'
+      );
+
+      authError.response = {
+        status: 401,
+        data: {
+          error: {
+            message:
+              'invalid x-api-key',
+          },
+        },
+      };
+
+      axios.post.mockRejectedValueOnce(
+        authError
+      );
+
+      await expect(
+        anthropicProvider.generateChatReply({
+          userMessage: 'hi',
+        })
+      ).rejects.toBe(authError);
+    }
+  );
 });

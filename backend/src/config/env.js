@@ -107,11 +107,14 @@ module.exports = {
 
   oauth: {
     google: {
-      clientId: process.env.GOOGLE_CLIENT_ID,
+      clientId:
+        process.env.GOOGLE_CLIENT_ID,
 
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      clientSecret:
+        process.env.GOOGLE_CLIENT_SECRET,
 
-      callbackUrl: process.env.GOOGLE_CALLBACK_URL,
+      callbackUrl:
+        process.env.GOOGLE_CALLBACK_URL,
     },
   },
 
@@ -123,9 +126,11 @@ module.exports = {
     process.env.FLIGHT_PROVIDER || 'mock',
 
   amadeus: {
-    clientId: process.env.AMADEUS_CLIENT_ID,
+    clientId:
+      process.env.AMADEUS_CLIENT_ID,
 
-    clientSecret: process.env.AMADEUS_CLIENT_SECRET,
+    clientSecret:
+      process.env.AMADEUS_CLIENT_SECRET,
 
     baseUrl:
       process.env.AMADEUS_BASE_URL ||
@@ -133,7 +138,8 @@ module.exports = {
   },
 
   ignav: {
-    apiKey: process.env.IGNAV_API_KEY,
+    apiKey:
+      process.env.IGNAV_API_KEY,
 
     baseUrl:
       process.env.IGNAV_BASE_URL ||
@@ -147,22 +153,22 @@ module.exports = {
   // AI / SHREYA
   // ============================================================
   //
-  // Gemini has been completely removed.
-  // Grok is the primary provider.
+  // Groq is the primary AI provider.
+  // Current model: openai/gpt-oss-120b
   // Anthropic remains available as an optional provider.
   //
 
   ai: {
     provider:
-      process.env.AI_PROVIDER || 'grok',
+      process.env.AI_PROVIDER || 'groq',
 
-    grok: {
+    groq: {
       apiKey:
-        process.env.GROK_API_KEY,
+        process.env.GROQ_API_KEY,
 
       model:
-        process.env.GROK_MODEL ||
-        'grok-4.6',
+        process.env.GROQ_MODEL ||
+        'openai/gpt-oss-120b',
     },
 
     anthropic: {
@@ -186,10 +192,11 @@ module.exports = {
     baseUrl:
       'https://api.openweathermap.org/data/2.5',
 
-    cacheTtlMinutes: parseInt(
-      process.env.WEATHER_CACHE_TTL_MINUTES || '30',
-      10
-    ),
+    cacheTtlMinutes:
+      parseInt(
+        process.env.WEATHER_CACHE_TTL_MINUTES || '30',
+        10
+      ),
   },
 
   // ============================================================
@@ -200,10 +207,11 @@ module.exports = {
     apiKey:
       process.env.GOOGLE_PLACES_API_KEY,
 
-    cacheTtlHours: parseInt(
-      process.env.PLACES_CACHE_TTL_HOURS || '24',
-      10
-    ),
+    cacheTtlHours:
+      parseInt(
+        process.env.PLACES_CACHE_TTL_HOURS || '24',
+        10
+      ),
   },
 
   // ============================================================
@@ -211,27 +219,32 @@ module.exports = {
   // ============================================================
 
   budget: {
-    dailyLivingCostMinInr: parseInt(
-      process.env.BUDGET_DAILY_MIN_INR || '1500',
-      10
-    ),
+    dailyLivingCostMinInr:
+      parseInt(
+        process.env.BUDGET_DAILY_MIN_INR || '1500',
+        10
+      ),
 
-    dailyLivingCostMaxInr: parseInt(
-      process.env.BUDGET_DAILY_MAX_INR || '4000',
-      10
-    ),
+    dailyLivingCostMaxInr:
+      parseInt(
+        process.env.BUDGET_DAILY_MAX_INR || '4000',
+        10
+      ),
 
-    accommodationShare: parseFloat(
-      process.env.BUDGET_ACCOMMODATION_SHARE || '0.5'
-    ),
+    accommodationShare:
+      parseFloat(
+        process.env.BUDGET_ACCOMMODATION_SHARE || '0.5'
+      ),
 
-    foodShare: parseFloat(
-      process.env.BUDGET_FOOD_SHARE || '0.3'
-    ),
+    foodShare:
+      parseFloat(
+        process.env.BUDGET_FOOD_SHARE || '0.3'
+      ),
 
-    localTransportShare: parseFloat(
-      process.env.BUDGET_LOCAL_TRANSPORT_SHARE || '0.2'
-    ),
+    localTransportShare:
+      parseFloat(
+        process.env.BUDGET_LOCAL_TRANSPORT_SHARE || '0.2'
+      ),
   },
 
   // ============================================================
@@ -267,25 +280,29 @@ module.exports = {
   // ============================================================
 
   optimizer: {
-    maxNearbyAirports: parseInt(
-      process.env.MAX_NEARBY_AIRPORTS || '3',
-      10
-    ),
+    maxNearbyAirports:
+      parseInt(
+        process.env.MAX_NEARBY_AIRPORTS || '3',
+        10
+      ),
 
-    maxDateFlexDays: parseInt(
-      process.env.MAX_DATE_FLEX_DAYS || '3',
-      10
-    ),
+    maxDateFlexDays:
+      parseInt(
+        process.env.MAX_DATE_FLEX_DAYS || '3',
+        10
+      ),
 
-    maxPermutations: parseInt(
-      process.env.MAX_PERMUTATIONS || '500',
-      10
-    ),
+    maxPermutations:
+      parseInt(
+        process.env.MAX_PERMUTATIONS || '500',
+        10
+      ),
 
-    maxCountriesPerTrip: parseInt(
-      process.env.MAX_COUNTRIES_PER_TRIP || '4',
-      10
-    ),
+    maxCountriesPerTrip:
+      parseInt(
+        process.env.MAX_COUNTRIES_PER_TRIP || '4',
+        10
+      ),
   },
 
   // ============================================================
@@ -293,15 +310,17 @@ module.exports = {
   // ============================================================
 
   cache: {
-    flightTtlMinutes: parseInt(
-      process.env.FLIGHT_CACHE_TTL_MINUTES || '20',
-      10
-    ),
+    flightTtlMinutes:
+      parseInt(
+        process.env.FLIGHT_CACHE_TTL_MINUTES || '20',
+        10
+      ),
 
-    staticTtlHours: parseInt(
-      process.env.STATIC_CACHE_TTL_HOURS || '24',
-      10
-    ),
+    staticTtlHours:
+      parseInt(
+        process.env.STATIC_TTL_HOURS || '24',
+        10
+      ),
   },
 
   // ============================================================

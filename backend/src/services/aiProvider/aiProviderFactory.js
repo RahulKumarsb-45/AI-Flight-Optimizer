@@ -1,10 +1,10 @@
-const grokProvider = require('./grokProvider');
+const groqProvider = require('./groqProvider');
 const anthropicProvider = require('./anthropicProvider');
 const config = require('../../config/env');
 const logger = require('../../logger/logger');
 
 const PROVIDERS = {
-  grok: grokProvider,
+  groq: groqProvider,
   anthropic: anthropicProvider,
 };
 
@@ -19,4 +19,6 @@ function getProvider(name = config.ai.provider) {
   return provider;
 }
 
-module.exports = { getProvider };
+module.exports = {
+  getProvider,
+};
