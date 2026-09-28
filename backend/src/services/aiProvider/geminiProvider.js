@@ -7,75 +7,87 @@ const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 /**
  * Gemini structured output schema.
  *
- * IMPORTANT:
- * - JSON Schema types must be lowercase.
- * - Nullable values use ["type", "null"].
- * - The schema is sent through generationConfig.responseFormat.
+ * This schema is used with the Gemini REST generateContent endpoint:
+ * generationConfig.responseMimeType
+ * generationConfig.responseSchema
+ *
+ * REST Schema types:
+ * OBJECT, STRING, ARRAY, INTEGER, BOOLEAN, NUMBER
  */
 const RESPONSE_SCHEMA = {
-  type: 'object',
+  type: 'OBJECT',
+
   properties: {
     reply: {
-      type: 'string',
-      description: 'Natural, conversational response to the traveler.',
+      type: 'STRING',
+      description:
+        'Natural, conversational response to the traveler.',
     },
 
     extractedParams: {
-      type: 'object',
+      type: 'OBJECT',
+
       properties: {
         originCity: {
-          type: ['string', 'null'],
+          type: 'STRING',
+          nullable: true,
           description:
             'Free-text city or airport the user is flying from, if mentioned.',
         },
 
         destinationCountries: {
-          type: 'array',
+          type: 'ARRAY',
           items: {
-            type: 'string',
+            type: 'STRING',
           },
           description:
             'Country names mentioned as desired destinations, up to 4.',
         },
 
         departureDate: {
-          type: ['string', 'null'],
+          type: 'STRING',
+          nullable: true,
           description:
             'YYYY-MM-DD if a specific departure date was given, otherwise null.',
         },
 
         returnDate: {
-          type: ['string', 'null'],
+          type: 'STRING',
+          nullable: true,
           description:
             'YYYY-MM-DD if a specific return date was given, otherwise null.',
         },
 
         dateFlexible: {
-          type: 'boolean',
+          type: 'BOOLEAN',
           description:
             'True if the user said their dates are flexible or open.',
         },
 
         travelers: {
-          type: ['integer', 'null'],
-          description: 'Number of travelers if mentioned.',
+          type: 'INTEGER',
+          nullable: true,
+          description:
+            'Number of travelers if mentioned.',
         },
 
         budgetInr: {
-          type: ['number', 'null'],
+          type: 'NUMBER',
+          nullable: true,
           description:
             'Budget in INR if mentioned, converted approximately from another currency if needed.',
         },
 
         preference: {
-          type: ['string', 'null'],
-          enum: ['cheapest', 'fastest', 'balanced', null],
+          type: 'STRING',
+          nullable: true,
+          enum: ['cheapest', 'fastest', 'balanced'],
           description:
             'Search preference if mentioned: cheapest, fastest, or balanced.',
         },
 
         readyToSearch: {
-          type: 'boolean',
+          type: 'BOOLEAN',
           description:
             'True once origin, at least one destination country, and either a date or explicit flexibility are known.',
         },
@@ -98,6 +110,9 @@ const RESPONSE_SCHEMA = {
   required: ['reply', 'extractedParams'],
 };
 
+/**
+ * System prompt for Shreya AI.
+ */
 const SYSTEM_PROMPT = `You are the travel-planning assistant inside FlightOptimizer, an Indian flight search app.
 
 Your ONLY job each turn is to:
@@ -113,21 +128,38 @@ Hard rules:
 - Keep replies to 2-3 sentences.
 - Return ONLY the requested JSON structure.`;
 
+/**
+ * Convert application chat history into Gemini contents format.
+ */
 function buildContents(history, userMessage) {
-  const contents = history.map((m) => ({
-    role: m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: m.content }],
+  const contents = history.map((message) => ({
+    role: message.role === 'assistant' ? 'model' : 'user',
+    parts: [
+      {
+        text: message.content,
+      },
+    ],
   }));
 
   contents.push({
     role: 'user',
-    parts: [{ text: userMessage }],
+    parts: [
+      {
+        text: userMessage,
+      },
+    ],
   });
 
   return contents;
 }
 
+/**
+ * Generate a response from Gemini.
+ */
 async function generateChatReply({ history = [], userMessage }) {
+  // ------------------------------------------------------------
+  // 1. Check Gemini configuration
+  // ------------------------------------------------------------
   if (!config.ai.gemini.apiKey) {
     throw new AppError(
       'AI chat is not configured. Set GEMINI_API_KEY in .env.',
@@ -141,6 +173,9 @@ async function generateChatReply({ history = [], userMessage }) {
   const url = `${BASE_URL}/models/${model}:generateContent`;
 
   try {
+    // ----------------------------------------------------------
+    // 2. Call Gemini
+    // ----------------------------------------------------------
     const response = await axios.post(
       url,
       {
@@ -154,37 +189,58 @@ async function generateChatReply({ history = [], userMessage }) {
           ],
         },
 
+        /**
+         * IMPORTANT:
+         *
+         * Do NOT use:
+         *
+         * responseFormat: {
+         *   text: {
+         *     mimeType: 'application/json'
+         *   }
+         * }
+         *
+         * For this REST generateContent request we use:
+         *
+         * responseMimeType
+         * responseSchema
+         */
         generationConfig: {
           maxOutputTokens: 500,
-
-          responseFormat: {
-            text: {
-              mimeType: 'application/json',
-              schema: RESPONSE_SCHEMA,
-            },
-          },
+          responseMimeType: 'application/json',
+          responseSchema: RESPONSE_SCHEMA,
         },
       },
       {
         headers: {
           'Content-Type': 'application/json',
+
+          // API key is sent through the header instead of URL query params.
           'x-goog-api-key': config.ai.gemini.apiKey,
         },
+
         timeout: 20000,
       }
     );
 
+    // ----------------------------------------------------------
+    // 3. Extract Gemini candidate
+    // ----------------------------------------------------------
     const candidate = response.data?.candidates?.[0];
 
     const finishReason = candidate?.finishReason;
 
     const parts = candidate?.content?.parts || [];
 
+    // Gemini can potentially return multiple text parts.
     const rawText = parts
       .filter((part) => typeof part?.text === 'string')
       .map((part) => part.text)
       .join('');
 
+    // ----------------------------------------------------------
+    // 4. Handle empty response
+    // ----------------------------------------------------------
     if (!rawText) {
       if (finishReason === 'SAFETY') {
         throw new AppError(
@@ -201,11 +257,20 @@ async function generateChatReply({ history = [], userMessage }) {
       );
     }
 
+    // ----------------------------------------------------------
+    // 5. Parse JSON
+    // ----------------------------------------------------------
     let parsed;
 
     try {
       parsed = JSON.parse(rawText);
-    } catch (err) {
+    } catch (parseError) {
+      console.error('Gemini returned invalid JSON:', {
+        model,
+        finishReason,
+        rawText: rawText.slice(0, 1000),
+      });
+
       throw new AppError(
         'AI provider returned malformed output.',
         502,
@@ -213,6 +278,9 @@ async function generateChatReply({ history = [], userMessage }) {
       );
     }
 
+    // ----------------------------------------------------------
+    // 6. Validate response structure
+    // ----------------------------------------------------------
     if (
       !parsed ||
       typeof parsed !== 'object' ||
@@ -220,6 +288,14 @@ async function generateChatReply({ history = [], userMessage }) {
       !parsed.extractedParams ||
       typeof parsed.extractedParams !== 'object'
     ) {
+      console.error('Gemini returned invalid response structure:', {
+        model,
+        keys:
+          parsed && typeof parsed === 'object'
+            ? Object.keys(parsed)
+            : [],
+      });
+
       throw new AppError(
         'AI provider returned an invalid response structure.',
         502,
@@ -227,29 +303,43 @@ async function generateChatReply({ history = [], userMessage }) {
       );
     }
 
+    // ----------------------------------------------------------
+    // 7. Return normalized result to aiChatService
+    // ----------------------------------------------------------
     return {
       reply: parsed.reply,
       extractedParams: parsed.extractedParams,
     };
   } catch (err) {
+    // ----------------------------------------------------------
+    // 8. Do not wrap our own AppErrors again
+    // ----------------------------------------------------------
     if (err instanceof AppError) {
       throw err;
     }
 
+    // ----------------------------------------------------------
+    // 9. Handle Axios/Gemini errors
+    // ----------------------------------------------------------
     if (axios.isAxiosError(err)) {
       const status = err.response?.status;
+
       const providerMessage =
         err.response?.data?.error?.message ||
         err.response?.data?.error?.status ||
         err.message;
 
-      // Log provider details without logging the API key.
+      // IMPORTANT:
+      // Never log the Gemini API key.
       console.error('Gemini API error:', {
         status,
         message: providerMessage,
         model,
       });
 
+      // --------------------------------------------------------
+      // Invalid request
+      // --------------------------------------------------------
       if (status === 400) {
         throw new AppError(
           `Gemini rejected the request: ${providerMessage}`,
@@ -258,6 +348,9 @@ async function generateChatReply({ history = [], userMessage }) {
         );
       }
 
+      // --------------------------------------------------------
+      // Authentication / authorization
+      // --------------------------------------------------------
       if (status === 401 || status === 403) {
         throw new AppError(
           'Gemini API authentication failed. Check GEMINI_API_KEY.',
@@ -266,6 +359,9 @@ async function generateChatReply({ history = [], userMessage }) {
         );
       }
 
+      // --------------------------------------------------------
+      // Rate limit
+      // --------------------------------------------------------
       if (status === 429) {
         throw new AppError(
           'Gemini API rate limit reached. Please try again shortly.',
@@ -274,6 +370,9 @@ async function generateChatReply({ history = [], userMessage }) {
         );
       }
 
+      // --------------------------------------------------------
+      // Other Gemini errors
+      // --------------------------------------------------------
       throw new AppError(
         'Gemini AI provider request failed.',
         502,
@@ -281,6 +380,9 @@ async function generateChatReply({ history = [], userMessage }) {
       );
     }
 
+    // ----------------------------------------------------------
+    // 10. Unknown error
+    // ----------------------------------------------------------
     throw err;
   }
 }
