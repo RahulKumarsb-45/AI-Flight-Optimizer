@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { ArrowRight, ShieldCheck, Zap, Users, MapPinned, CalendarRange, Route } from 'lucide-react';
 import { buttonVariants } from '@/components/ui/button-variants';
+import { useAuth } from '@/hooks/useAuth';
 
 const TRUST_ITEMS = [
   { icon: ShieldCheck, label: 'Trusted recommendations' },
@@ -35,6 +36,7 @@ function BenefitItems() {
 }
 
 function Hero() {
+    const { isAuthenticated, loading } = useAuth();
   return (
     <section className="relative overflow-hidden bg-horizon-900">
       {/*
@@ -90,11 +92,14 @@ function Hero() {
               multi-city routes — then explain exactly why each recommendation beats the rest.
             </p>
 
-            <div className="mt-6 flex flex-col gap-3 sm:flex-row">
-              <Link href="/register" className={`${buttonVariants({ size: 'lg' })} w-full sm:w-auto`}>
-                Plan your first trip
-                <ArrowRight className="h-4 w-4" aria-hidden="true" />
-              </Link>
+           <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+           <Link
+                     href={loading ? '#' : isAuthenticated ? '/search' : '/register'}
+                     className={`${buttonVariants({ size: 'lg' })} w-full sm:w-auto`}
+            >
+                  Plan your first trip
+                  <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                  </Link>
               <Link
                 href="/#how-it-works"
                 className={`${buttonVariants({ variant: 'outline', size: 'lg' })} w-full border-ink-200 bg-white/70 backdrop-blur-sm hover:bg-white sm:w-auto`}
