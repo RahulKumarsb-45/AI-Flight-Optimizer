@@ -2,92 +2,80 @@ const axios = require('axios');
 const config = require('../../config/env');
 const AppError = require('../../utils/AppError');
 
-const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+const BASE_URL = 'https://api.x.ai/v1';
 
 /**
- * Gemini structured output schema.
+ * Shreya AI structured output schema.
  *
- * This schema is used with the Gemini REST generateContent endpoint:
- * generationConfig.responseMimeType
- * generationConfig.responseSchema
- *
- * REST Schema types:
- * OBJECT, STRING, ARRAY, INTEGER, BOOLEAN, NUMBER
+ * Grok returns exactly this JSON structure.
  */
 const RESPONSE_SCHEMA = {
-  type: 'OBJECT',
-
+  type: 'object',
   properties: {
     reply: {
-      type: 'STRING',
+      type: 'string',
       description:
         'Natural, conversational response to the traveler.',
     },
 
     extractedParams: {
-      type: 'OBJECT',
+      type: 'object',
 
       properties: {
         originCity: {
-          type: 'STRING',
-          nullable: true,
+          type: ['string', 'null'],
           description:
             'Free-text city or airport the user is flying from, if mentioned.',
         },
 
         destinationCountries: {
-          type: 'ARRAY',
+          type: 'array',
           items: {
-            type: 'STRING',
+            type: 'string',
           },
           description:
             'Country names mentioned as desired destinations, up to 4.',
         },
 
         departureDate: {
-          type: 'STRING',
-          nullable: true,
+          type: ['string', 'null'],
           description:
             'YYYY-MM-DD if a specific departure date was given, otherwise null.',
         },
 
         returnDate: {
-          type: 'STRING',
-          nullable: true,
+          type: ['string', 'null'],
           description:
             'YYYY-MM-DD if a specific return date was given, otherwise null.',
         },
 
         dateFlexible: {
-          type: 'BOOLEAN',
+          type: 'boolean',
           description:
             'True if the user said their dates are flexible or open.',
         },
 
         travelers: {
-          type: 'INTEGER',
-          nullable: true,
+          type: ['integer', 'null'],
           description:
             'Number of travelers if mentioned.',
         },
 
         budgetInr: {
-          type: 'NUMBER',
-          nullable: true,
+          type: ['number', 'null'],
           description:
             'Budget in INR if mentioned, converted approximately from another currency if needed.',
         },
 
         preference: {
-          type: 'STRING',
-          nullable: true,
+          type: ['string', 'null'],
           enum: ['cheapest', 'fastest', 'balanced'],
           description:
-            'Search preference if mentioned: cheapest, fastest, or balanced.',
+            'Search preference if mentioned.',
         },
 
         readyToSearch: {
-          type: 'BOOLEAN',
+          type: 'boolean',
           description:
             'True once origin, at least one destination country, and either a date or explicit flexibility are known.',
         },
@@ -104,10 +92,14 @@ const RESPONSE_SCHEMA = {
         'preference',
         'readyToSearch',
       ],
+
+      additionalProperties: false,
     },
   },
 
   required: ['reply', 'extractedParams'],
+
+  additionalProperties: false,
 };
 
 /**
@@ -129,127 +121,126 @@ Hard rules:
 - Return ONLY the requested JSON structure.`;
 
 /**
- * Convert application chat history into Gemini contents format.
+ * Convert application chat history into xAI Responses API input.
  */
-function buildContents(history, userMessage) {
-  const contents = history.map((message) => ({
-    role: message.role === 'assistant' ? 'model' : 'user',
-    parts: [
-      {
-        text: message.content,
-      },
-    ],
-  }));
+function buildInput(history, userMessage) {
+  const input = [
+    {
+      role: 'system',
+      content: SYSTEM_PROMPT,
+    },
+  ];
 
-  contents.push({
+  for (const message of history) {
+    input.push({
+      role: message.role === 'assistant' ? 'assistant' : 'user',
+      content: message.content,
+    });
+  }
+
+  input.push({
     role: 'user',
-    parts: [
-      {
-        text: userMessage,
-      },
-    ],
+    content: userMessage,
   });
 
-  return contents;
+  return input;
 }
 
 /**
- * Generate a response from Gemini.
+ * Extract text from xAI Responses API output.
  */
-async function generateChatReply({ history = [], userMessage }) {
+function extractResponseText(responseData) {
+  if (typeof responseData?.output_text === 'string') {
+    return responseData.output_text;
+  }
+
+  const output = responseData?.output || [];
+
+  for (const item of output) {
+    if (item?.type !== 'message') {
+      continue;
+    }
+
+    const content = item?.content || [];
+
+    for (const part of content) {
+      if (
+        part?.type === 'output_text' &&
+        typeof part?.text === 'string'
+      ) {
+        return part.text;
+      }
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Generate a response from Grok.
+ */
+async function generateChatReply({
+  history = [],
+  userMessage,
+}) {
   // ------------------------------------------------------------
-  // 1. Check Gemini configuration
+  // 1. Check Grok configuration
   // ------------------------------------------------------------
-  if (!config.ai.gemini.apiKey) {
+  if (!config.ai.grok.apiKey) {
     throw new AppError(
-      'AI chat is not configured. Set GEMINI_API_KEY in .env.',
+      'AI chat is not configured. Set GROK_API_KEY in .env.',
       500,
       'AI_NOT_CONFIGURED'
     );
   }
 
-  const model = config.ai.gemini.model;
+  const model = config.ai.grok.model;
 
-  const url = `${BASE_URL}/models/${model}:generateContent`;
+  const url = `${BASE_URL}/responses`;
 
   try {
     // ----------------------------------------------------------
-    // 2. Call Gemini
+    // 2. Build request
+    // ----------------------------------------------------------
+    const payload = {
+      model,
+
+      input: buildInput(history, userMessage),
+
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'flight_optimizer_response',
+          schema: RESPONSE_SCHEMA,
+          strict: true,
+        },
+      },
+
+      store: false,
+    };
+
+    // ----------------------------------------------------------
+    // 3. Call Grok
     // ----------------------------------------------------------
     const response = await axios.post(
       url,
-      {
-        contents: buildContents(history, userMessage),
-
-        systemInstruction: {
-          parts: [
-            {
-              text: SYSTEM_PROMPT,
-            },
-          ],
-        },
-
-        /**
-         * IMPORTANT:
-         *
-         * Do NOT use:
-         *
-         * responseFormat: {
-         *   text: {
-         *     mimeType: 'application/json'
-         *   }
-         * }
-         *
-         * For this REST generateContent request we use:
-         *
-         * responseMimeType
-         * responseSchema
-         */
-        generationConfig: {
-          maxOutputTokens: 500,
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA,
-        },
-      },
+      payload,
       {
         headers: {
           'Content-Type': 'application/json',
-
-          // API key is sent through the header instead of URL query params.
-          'x-goog-api-key': config.ai.gemini.apiKey,
+          Authorization: `Bearer ${config.ai.grok.apiKey}`,
         },
 
-        timeout: 20000,
+        timeout: 30000,
       }
     );
 
     // ----------------------------------------------------------
-    // 3. Extract Gemini candidate
+    // 4. Extract response text
     // ----------------------------------------------------------
-    const candidate = response.data?.candidates?.[0];
+    const rawText = extractResponseText(response.data);
 
-    const finishReason = candidate?.finishReason;
-
-    const parts = candidate?.content?.parts || [];
-
-    // Gemini can potentially return multiple text parts.
-    const rawText = parts
-      .filter((part) => typeof part?.text === 'string')
-      .map((part) => part.text)
-      .join('');
-
-    // ----------------------------------------------------------
-    // 4. Handle empty response
-    // ----------------------------------------------------------
     if (!rawText) {
-      if (finishReason === 'SAFETY') {
-        throw new AppError(
-          'That message could not be processed. Try rephrasing.',
-          400,
-          'AI_SAFETY_BLOCKED'
-        );
-      }
-
       throw new AppError(
         'AI provider returned an empty response.',
         502,
@@ -265,9 +256,8 @@ async function generateChatReply({ history = [], userMessage }) {
     try {
       parsed = JSON.parse(rawText);
     } catch (parseError) {
-      console.error('Gemini returned invalid JSON:', {
+      console.error('Grok returned invalid JSON:', {
         model,
-        finishReason,
         rawText: rawText.slice(0, 1000),
       });
 
@@ -288,13 +278,16 @@ async function generateChatReply({ history = [], userMessage }) {
       !parsed.extractedParams ||
       typeof parsed.extractedParams !== 'object'
     ) {
-      console.error('Gemini returned invalid response structure:', {
-        model,
-        keys:
-          parsed && typeof parsed === 'object'
-            ? Object.keys(parsed)
-            : [],
-      });
+      console.error(
+        'Grok returned invalid response structure:',
+        {
+          model,
+          keys:
+            parsed && typeof parsed === 'object'
+              ? Object.keys(parsed)
+              : [],
+        }
+      );
 
       throw new AppError(
         'AI provider returned an invalid response structure.',
@@ -304,7 +297,7 @@ async function generateChatReply({ history = [], userMessage }) {
     }
 
     // ----------------------------------------------------------
-    // 7. Return normalized result to aiChatService
+    // 7. Return normalized result
     // ----------------------------------------------------------
     return {
       reply: parsed.reply,
@@ -312,14 +305,14 @@ async function generateChatReply({ history = [], userMessage }) {
     };
   } catch (err) {
     // ----------------------------------------------------------
-    // 8. Do not wrap our own AppErrors again
+    // 8. Preserve our own AppErrors
     // ----------------------------------------------------------
     if (err instanceof AppError) {
       throw err;
     }
 
     // ----------------------------------------------------------
-    // 9. Handle Axios/Gemini errors
+    // 9. Handle Axios / xAI errors
     // ----------------------------------------------------------
     if (axios.isAxiosError(err)) {
       const status = err.response?.status;
@@ -329,9 +322,8 @@ async function generateChatReply({ history = [], userMessage }) {
         err.response?.data?.error?.status ||
         err.message;
 
-      // IMPORTANT:
-      // Never log the Gemini API key.
-      console.error('Gemini API error:', {
+      // Never log the API key.
+      console.error('Grok API error:', {
         status,
         message: providerMessage,
         model,
@@ -342,7 +334,7 @@ async function generateChatReply({ history = [], userMessage }) {
       // --------------------------------------------------------
       if (status === 400) {
         throw new AppError(
-          `Gemini rejected the request: ${providerMessage}`,
+          `Grok rejected the request: ${providerMessage}`,
           502,
           'AI_PROVIDER_ERROR'
         );
@@ -353,7 +345,7 @@ async function generateChatReply({ history = [], userMessage }) {
       // --------------------------------------------------------
       if (status === 401 || status === 403) {
         throw new AppError(
-          'Gemini API authentication failed. Check GEMINI_API_KEY.',
+          'Grok API authentication failed. Check GROK_API_KEY.',
           502,
           'AI_PROVIDER_ERROR'
         );
@@ -364,17 +356,28 @@ async function generateChatReply({ history = [], userMessage }) {
       // --------------------------------------------------------
       if (status === 429) {
         throw new AppError(
-          'Gemini API rate limit reached. Please try again shortly.',
+          'Grok API rate limit reached. Please try again shortly.',
           429,
           'AI_RATE_LIMITED'
         );
       }
 
       // --------------------------------------------------------
-      // Other Gemini errors
+      // Service unavailable
+      // --------------------------------------------------------
+      if (status === 500 || status === 502 || status === 503) {
+        throw new AppError(
+          'Grok AI service is temporarily unavailable. Please try again shortly.',
+          503,
+          'AI_PROVIDER_UNAVAILABLE'
+        );
+      }
+
+      // --------------------------------------------------------
+      // Other provider errors
       // --------------------------------------------------------
       throw new AppError(
-        'Gemini AI provider request failed.',
+        'Grok AI provider request failed.',
         502,
         'AI_PROVIDER_ERROR'
       );

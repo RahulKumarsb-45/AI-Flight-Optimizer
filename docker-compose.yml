@@ -58,32 +58,53 @@ services:
     volumes:
       - ./backend:/app
       - backend_test_node_modules:/app/node_modules
+
     environment:
       NODE_ENV: test
+
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/flight_optimizer_test
       PG_SSL: 'false'
+
       JWT_ACCESS_SECRET: test_access_secret
       JWT_REFRESH_SECRET: test_refresh_secret
       JWT_ACCESS_EXPIRES: 15m
       JWT_REFRESH_EXPIRES: 30d
+
+      # Flight Provider
       FLIGHT_PROVIDER: mock
+
+      # Optimizer
       MAX_NEARBY_AIRPORTS: 3
       MAX_DATE_FLEX_DAYS: 3
       MAX_PERMUTATIONS: 500
       MAX_COUNTRIES_PER_TRIP: 4
       FLIGHT_CACHE_TTL_MINUTES: 20
       STATIC_CACHE_TTL_HOURS: 24
+
+      # Sentry
       SENTRY_DSN: ''
       SENTRY_ENABLED: 'false'
+
+      # Google OAuth
       GOOGLE_CLIENT_ID: test_google_client_id
       GOOGLE_CLIENT_SECRET: test_google_client_secret
       GOOGLE_CALLBACK_URL: http://localhost:5000/api/auth/google/callback
+
+      # Razorpay
       RAZORPAY_KEY_ID: rzp_test_fake_key_id
       RAZORPAY_KEY_SECRET: test_fake_razorpay_key_secret
       RAZORPAY_WEBHOOK_SECRET: test_fake_razorpay_webhook_secret
-      AI_PROVIDER: gemini
-      GEMINI_API_KEY: test_fake_gemini_key_1234
+
+      # =========================
+      # SHREYA AI / GROK
+      # =========================
+      AI_PROVIDER: grok
+      GROK_API_KEY: test_fake_grok_key_1234
+      GROK_MODEL: grok-4.6
+
+      # Other AI Provider
       ANTHROPIC_API_KEY: test_fake_anthropic_key_1234
+
     command: ['npm', 'test']
 
   backend:
@@ -105,22 +126,35 @@ services:
       PORT: 5000
       FRONTEND_URL: http://localhost:3000
 
+      # =========================
+      # Database
+      # =========================
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/flight_optimizer
       PG_SSL: 'false'
 
+      # =========================
+      # Redis
+      # =========================
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
 
+      # =========================
+      # JWT
+      # =========================
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-change_me_access_secret}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change_me_refresh_secret}
       JWT_ACCESS_EXPIRES: 15m
       JWT_REFRESH_EXPIRES: 30d
 
+      # =========================
       # Google OAuth
+      # =========================
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:-http://localhost:5000/api/auth/google/callback}
 
+      # =========================
       # Flight Provider
+      # =========================
       FLIGHT_PROVIDER: ignav
       AMADEUS_CLIENT_ID: ${AMADEUS_CLIENT_ID:-}
       AMADEUS_CLIENT_SECRET: ${AMADEUS_CLIENT_SECRET:-}
@@ -129,29 +163,42 @@ services:
       IGNAV_MARKET: ${IGNAV_MARKET:-IN}
 
       # =========================
-      # SHREYA AI / GEMINI
+      # SHREYA AI / GROK
       # =========================
-      AI_PROVIDER: ${AI_PROVIDER:-gemini}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      AI_PROVIDER: ${AI_PROVIDER:-grok}
+      GROK_API_KEY: ${GROK_API_KEY:-}
+      GROK_MODEL: ${GROK_MODEL:-grok-4.6}
 
-      # Other APIs
+      # =========================
+      # Other AI Provider
+      # =========================
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
+
+      # =========================
+      # Other APIs
+      # =========================
       OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY:-}
       GOOGLE_PLACES_API_KEY: ${GOOGLE_PLACES_API_KEY:-}
       PLACES_CACHE_TTL_HOURS: ${PLACES_CACHE_TTL_HOURS:-24}
 
+      # =========================
       # Razorpay
+      # =========================
       RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
       RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
 
+      # =========================
       # Sentry
+      # =========================
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
       SENTRY_RELEASE: ${SENTRY_RELEASE:-}
       SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
 
+      # =========================
       # Optimizer
+      # =========================
       MAX_NEARBY_AIRPORTS: 3
       MAX_DATE_FLEX_DAYS: 3
       MAX_PERMUTATIONS: 500
@@ -169,7 +216,6 @@ services:
         NEXT_PUBLIC_GA_MEASUREMENT_ID: ${NEXT_PUBLIC_GA_MEASUREMENT_ID:-}
 
     container_name: flight-optimizer-frontend
-
     restart: unless-stopped
 
     depends_on:

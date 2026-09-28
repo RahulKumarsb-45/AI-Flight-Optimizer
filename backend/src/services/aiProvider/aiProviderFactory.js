@@ -1,19 +1,21 @@
-const geminiProvider = require('./geminiProvider');
+const grokProvider = require('./grokProvider');
 const anthropicProvider = require('./anthropicProvider');
 const config = require('../../config/env');
 const logger = require('../../logger/logger');
 
 const PROVIDERS = {
-  gemini: geminiProvider,
+  grok: grokProvider,
   anthropic: anthropicProvider,
 };
 
 function getProvider(name = config.ai.provider) {
   const provider = PROVIDERS[name];
+
   if (!provider) {
-    logger.warn(`Unknown AI_PROVIDER "${name}", falling back to gemini`);
-    return PROVIDERS.gemini;
+    logger.error(`Unknown AI_PROVIDER "${name}"`);
+    throw new Error(`Unsupported AI provider: ${name}`);
   }
+
   return provider;
 }
 
