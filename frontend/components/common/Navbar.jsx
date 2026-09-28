@@ -71,9 +71,9 @@ function Navbar() {
               <Link href="/login" className={LOGIN_BUTTON_CLASSES}>
                 Login
               </Link>
-              <Link href="/register" className={buttonVariants({ size: 'sm' })}>
-                Get started
-              </Link>
+            <Link href="/register?redirect=/" className={buttonVariants({ size: 'sm' })}>
+            Get started
+            </Link>
             </div>
           )}
           {!loading && isAuthenticated && (
@@ -142,9 +142,9 @@ function Navbar() {
                 <Link href="/login" className={cn(LOGIN_BUTTON_CLASSES, 'h-11 w-full text-[15px]')}>
                   Login
                 </Link>
-                <Link href="/register" className={buttonVariants({})}>
-                  Get started
-                </Link>
+                <Link href="/register?redirect=/" className={buttonVariants({})}>
+                Get started
+                 </Link>
               </>
             ) : (
               <button onClick={logout} className={buttonVariants({ variant: 'outline' })}>

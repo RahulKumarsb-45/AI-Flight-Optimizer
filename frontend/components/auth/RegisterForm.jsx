@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -17,15 +17,30 @@ import { trackSignUp } from '@/lib/analytics';
 // Mirrors backend/src/validators/authValidators.js exactly — a mismatch here
 // means users pass frontend validation only to get rejected by the API.
 const schema = z.object({
-  name: z.string().trim().min(2, 'Name must be at least 2 characters').max(150),
-  email: z.string().trim().email('Enter a valid email address'),
+  name: z
+    .string()
+    .trim()
+    .min(2, 'Name must be at least 2 characters')
+    .max(150),
+
+  email: z
+    .string()
+    .trim()
+    .email('Enter a valid email address'),
+
   password: z
     .string()
     .min(8, 'Password must be at least 8 characters')
     .regex(/[A-Z]/, 'Password must contain an uppercase letter')
     .regex(/[0-9]/, 'Password must contain a number'),
+
   confirmPassword: z.string(),
-  agreeToTerms: z.literal(true, { errorMap: () => ({ message: 'You must agree to the terms to continue' }) }),
+
+  agreeToTerms: z.literal(true, {
+    errorMap: () => ({
+      message: 'You must agree to the terms to continue',
+    }),
+  }),
 }).refine((data) => data.password === data.confirmPassword, {
   message: 'Passwords do not match',
   path: ['confirmPassword'],
@@ -33,6 +48,14 @@ const schema = z.object({
 
 function RegisterForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // Read the destination passed from the CTA.
+  // Example:
+  // /register?redirect=/
+  // /register?redirect=/dashboard
+  const redirect = searchParams.get('redirect') || '/';
+
   const { register: registerUser, login } = useAuth();
   const { toast } = useToast();
   const [submitting, setSubmitting] = useState(false);
@@ -41,34 +64,50 @@ function RegisterForm() {
     register,
     handleSubmit,
     formState: { errors },
-  } = useForm({ resolver: zodResolver(schema) });
+  } = useForm({
+    resolver: zodResolver(schema),
+  });
 
   async function onSubmit(values) {
     setSubmitting(true);
+
     try {
+      // 1. Create the account
       await registerUser({
-  name: values.name,
-  email: values.email,
-  password: values.password,
-});
+        name: values.name,
+        email: values.email,
+        password: values.password,
+      });
 
-await login({
-  email: values.email,
-  password: values.password,
-});
+      // 2. Automatically log the newly created user in
+      await login({
+        email: values.email,
+        password: values.password,
+      });
 
-trackSignUp({ method: 'password' });
+      // 3. Track successful signup
+      trackSignUp({ method: 'password' });
 
-toast({
-  variant: 'success',
-  title: 'Account created',
-  description: 'Welcome to FlightOptimizer!',
-});
+      // 4. Show success message
+      toast({
+        variant: 'success',
+        title: 'Account created',
+        description: 'Welcome to FlightOptimizer!',
+      });
 
-router.push('/search');
+      // 5. Send user to the page that originally requested signup
+      router.push(redirect);
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : 'Something went wrong. Please try again.';
-      toast({ variant: 'error', title: 'Registration failed', description: message });
+      const message =
+        err instanceof ApiError
+          ? err.message
+          : 'Something went wrong. Please try again.';
+
+      toast({
+        variant: 'error',
+        title: 'Registration failed',
+        description: message,
+      });
     } finally {
       setSubmitting(false);
     }
@@ -77,15 +116,33 @@ router.push('/search');
   return (
     <div className="flex flex-col gap-5">
       <OAuthButtons />
+
       <div className="flex items-center gap-3 text-xs text-ink-400">
         <div className="h-px flex-1 bg-ink-100" />
         or sign up with email
         <div className="h-px flex-1 bg-ink-100" />
       </div>
 
-      <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4" noValidate>
-        <Input label="Full name" placeholder="Aditi Sharma" error={errors.name?.message} {...register('name')} />
-        <Input label="Email" type="email" placeholder="you@example.com" error={errors.email?.message} {...register('email')} />
+      <form
+        onSubmit={handleSubmit(onSubmit)}
+        className="flex flex-col gap-4"
+        noValidate
+      >
+        <Input
+          label="Full name"
+          placeholder="Aditi Sharma"
+          error={errors.name?.message}
+          {...register('name')}
+        />
+
+        <Input
+          label="Email"
+          type="email"
+          placeholder="you@example.com"
+          error={errors.email?.message}
+          {...register('email')}
+        />
+
         <Input
           label="Password"
           type="password"
@@ -94,6 +151,7 @@ router.push('/search');
           error={errors.password?.message}
           {...register('password')}
         />
+
         <Input
           label="Confirm password"
           type="password"
@@ -106,22 +164,46 @@ router.push('/search');
             type="checkbox"
             className="mt-0.5 h-4 w-4 rounded border-ink-300"
             aria-invalid={!!errors.agreeToTerms}
-            aria-describedby={errors.agreeToTerms ? 'agree-to-terms-error' : undefined}
+            aria-describedby={
+              errors.agreeToTerms
+                ? 'agree-to-terms-error'
+                : undefined
+            }
             {...register('agreeToTerms')}
           />
+
           <span>
             I agree to the{' '}
-            <Link href="/terms" className="underline hover:text-ink-900">Terms</Link> and{' '}
-            <Link href="/privacy" className="underline hover:text-ink-900">Privacy Policy</Link>
+            <Link
+              href="/terms"
+              className="underline hover:text-ink-900"
+            >
+              Terms
+            </Link>{' '}
+            and{' '}
+            <Link
+              href="/privacy"
+              className="underline hover:text-ink-900"
+            >
+              Privacy Policy
+            </Link>
           </span>
         </label>
+
         {errors.agreeToTerms && (
-          <p id="agree-to-terms-error" className="-mt-2 text-sm text-danger-600">
+          <p
+            id="agree-to-terms-error"
+            className="-mt-2 text-sm text-danger-600"
+          >
             {errors.agreeToTerms.message}
           </p>
         )}
 
-        <Button type="submit" loading={submitting} className="mt-2">
+        <Button
+          type="submit"
+          loading={submitting}
+          className="mt-2"
+        >
           Create account
         </Button>
       </form>

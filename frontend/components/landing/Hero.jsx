@@ -94,12 +94,18 @@ function Hero() {
 
            <div className="mt-6 flex flex-col gap-3 sm:flex-row">
            <Link
-                     href={loading ? '#' : isAuthenticated ? '/search' : '/register'}
-                     className={`${buttonVariants({ size: 'lg' })} w-full sm:w-auto`}
-            >
-                  Plan your first trip
-                  <ArrowRight className="h-4 w-4" aria-hidden="true" />
-                  </Link>
+  href={
+    loading
+      ? '#'
+      : isAuthenticated
+        ? '/dashboard'
+        : '/register?redirect=/dashboard'
+  }
+  className={`${buttonVariants({ size: 'lg' })} w-full sm:w-auto`}
+>
+  Plan your first trip
+  <ArrowRight className="h-4 w-4" aria-hidden="true" />
+</Link>
               <Link
                 href="/#how-it-works"
                 className={`${buttonVariants({ variant: 'outline', size: 'lg' })} w-full border-ink-200 bg-white/70 backdrop-blur-sm hover:bg-white sm:w-auto`}
