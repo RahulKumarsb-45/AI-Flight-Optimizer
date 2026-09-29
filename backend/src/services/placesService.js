@@ -5,7 +5,7 @@ const { placesCache } = require('../cache/memoryCache');
 const redisCache = require('../cache/redisCache');
 const logger = require('../logger/logger');
 
-const REDIS_NAMESPACE = 'placescache';
+const REDIS_NAMESPACE = 'placescache-v2-dummy-images';
 
 function redisKeyFor(cacheKey) {
   return `${REDIS_NAMESPACE}:${cacheKey}`;
@@ -76,6 +76,49 @@ const CACHE_TTL_MS =
 const DEFAULT_RADIUS_METERS = 5000;
 const ATTRACTIONS_RADIUS_METERS = 10000;
 
+// ============================================================
+// LOCAL DUMMY IMAGES
+// ============================================================
+
+const DUMMY_IMAGE_COUNT = 10;
+
+const DUMMY_IMAGE_PATHS = {
+  hotel: Array.from(
+    { length: DUMMY_IMAGE_COUNT },
+    (_, index) =>
+      `/images/hotels/hotel-${index + 1}.jpg`
+  ),
+
+  restaurant: Array.from(
+    { length: DUMMY_IMAGE_COUNT },
+    (_, index) =>
+      `/images/restaurants/restaurant-${index + 1}.jpg`
+  ),
+};
+
+/**
+ * Return a different local image for each result.
+ *
+ * Hotel:
+ * /images/hotels/hotel-1.jpg ... hotel-10.jpg
+ *
+ * Restaurant:
+ * /images/restaurants/restaurant-1.jpg ... restaurant-10.jpg
+ */
+function getDummyImageUrl(imageType, index) {
+  const images = DUMMY_IMAGE_PATHS[imageType];
+
+  if (!images || images.length === 0) {
+    return null;
+  }
+
+  return images[index % images.length];
+}
+
+// ============================================================
+// PLACES CONFIG
+// ============================================================
+
 function requireApiKey() {
   if (!config.places.apiKey) {
     throw new AppError(
@@ -111,8 +154,8 @@ const PLACE_CATEGORIES = {
 };
 
 /**
- * Convert Geoapify place properties into the application's
- * existing normalized place shape.
+ * Convert Geoapify place properties into
+ * the application's normalized place shape.
  */
 function normalizePlace(properties) {
   if (!properties) {
@@ -127,6 +170,7 @@ function normalizePlace(properties) {
       mapsUri: null,
       location: null,
       photoName: null,
+      imageUrl: null,
     };
   }
 
@@ -177,7 +221,7 @@ function normalizePlace(properties) {
       properties.open_now ??
       null,
 
-    // Geoapify does not provide a Google Maps URI.
+    // Google Maps search URL
     mapsUri:
       lat !== null && lon !== null
         ? `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`
@@ -191,14 +235,25 @@ function normalizePlace(properties) {
           }
         : null,
 
-    // Geoapify does not provide Google Places photo names.
-    photoName:
-      null,
+    // Filled later with local dummy image.
+    photoName: null,
+
+    // Filled later with local dummy image.
+    imageUrl: null,
   };
 }
 
+// ============================================================
+// GEOAPIFY NEARBY SEARCH
+// ============================================================
+
 /**
  * Search nearby places using Geoapify.
+ *
+ * imageType:
+ * - hotel
+ * - restaurant
+ * - null for attractions
  */
 async function searchNearby({
   lat,
@@ -207,11 +262,18 @@ async function searchNearby({
   cacheKeyPrefix,
   radiusMeters = DEFAULT_RADIUS_METERS,
   maxResults = 10,
+  imageType = null,
 }) {
   requireApiKey();
 
+  /**
+   * v2 is intentional.
+   *
+   * It prevents old cached responses containing
+   * previous image values from being reused.
+   */
   const cacheKey =
-    `${cacheKeyPrefix}:` +
+    `${cacheKeyPrefix}:v2:` +
     `${lat.toFixed(3)},` +
     `${lon.toFixed(3)}`;
 
@@ -225,12 +287,15 @@ async function searchNearby({
   }
 
   try {
+    // ========================================================
+    // 1. GET PLACES FROM GEOAPIFY
+    // ========================================================
+
     const response = await axios.get(
       BASE_URL,
       {
         params: {
-          categories:
-            categories.join(','),
+          categories: categories.join(','),
 
           filter:
             `circle:${lon},${lat},${radiusMeters}`,
@@ -238,8 +303,10 @@ async function searchNearby({
           bias:
             `proximity:${lon},${lat}`,
 
-          limit:
-            Math.min(maxResults, 20),
+          limit: Math.min(
+            maxResults,
+            20
+          ),
 
           apiKey:
             config.places.apiKey,
@@ -252,20 +319,61 @@ async function searchNearby({
     const features =
       response.data?.features || [];
 
-    const results = features
-      .map((feature) =>
-        normalizePlace(feature.properties)
-      )
-      .filter((place) => place.name)
-      .slice(0, maxResults);
+    const results =
+      features
+        .map(
+          (feature) =>
+            normalizePlace(
+              feature.properties
+            )
+        )
+        .filter(
+          (place) =>
+            place.name
+        )
+        .slice(
+          0,
+          maxResults
+        );
+
+    // ========================================================
+    // 2. ADD LOCAL DUMMY IMAGES
+    // ========================================================
+
+    const finalResults =
+      results.map(
+        (place, index) => {
+          const dummyImage =
+            getDummyImageUrl(
+              imageType,
+              index
+            );
+
+          return {
+            ...place,
+
+            // Frontend currently reads photoName.
+            photoName: dummyImage,
+
+            // Keep imageUrl too for compatibility
+            // with any other existing callers.
+            imageUrl: dummyImage,
+          };
+        }
+      );
+
+    // ========================================================
+    // 3. CACHE COMPLETE RESULT
+    // ========================================================
 
     writeToCache(
       cacheKey,
-      results,
+      finalResults,
       CACHE_TTL_MS
     );
 
-    return results;
+    return finalResults;
+
   } catch (err) {
     const status =
       err.response?.status;
@@ -283,7 +391,8 @@ async function searchNearby({
         'Geoapify Places authentication failed',
         {
           status,
-          error: providerMessage,
+          error:
+            providerMessage,
         }
       );
 
@@ -301,7 +410,8 @@ async function searchNearby({
         lon,
         categories,
         status,
-        error: providerMessage,
+        error:
+          providerMessage,
       }
     );
 
@@ -313,6 +423,10 @@ async function searchNearby({
   }
 }
 
+// ============================================================
+// HOTELS
+// ============================================================
+
 /**
  * Hotels / accommodation.
  */
@@ -323,16 +437,27 @@ async function getNearbyHotels({
   return searchNearby({
     lat,
     lon,
+
     categories:
       PLACE_CATEGORIES.hotels,
+
     cacheKeyPrefix:
       'hotels',
+
     radiusMeters:
       DEFAULT_RADIUS_METERS,
+
     maxResults:
       10,
+
+    imageType:
+      'hotel',
   });
 }
+
+// ============================================================
+// RESTAURANTS
+// ============================================================
 
 /**
  * Restaurants / cafes / fast food.
@@ -344,19 +469,34 @@ async function getNearbyRestaurants({
   return searchNearby({
     lat,
     lon,
+
     categories:
       PLACE_CATEGORIES.restaurants,
+
     cacheKeyPrefix:
       'restaurants',
+
     radiusMeters:
       DEFAULT_RADIUS_METERS,
+
     maxResults:
       10,
+
+    imageType:
+      'restaurant',
   });
 }
 
+// ============================================================
+// TOURIST ATTRACTIONS
+// ============================================================
+
 /**
  * Tourist attractions.
+ *
+ * No local attraction images are assigned because
+ * the current image folders contain hotel and
+ * restaurant image sets.
  */
 async function getTouristAttractions({
   lat,
@@ -365,26 +505,39 @@ async function getTouristAttractions({
   return searchNearby({
     lat,
     lon,
+
     categories:
       PLACE_CATEGORIES.attractions,
+
     cacheKeyPrefix:
       'attractions',
+
     radiusMeters:
       ATTRACTIONS_RADIUS_METERS,
+
     maxResults:
       10,
+
+    imageType:
+      null,
   });
 }
 
+// ============================================================
+// BACKWARD COMPATIBILITY
+// ============================================================
+
 /**
- * Geoapify does not expose Google Places photo names.
- *
- * Keep this function so existing callers do not crash,
- * but return null instead of calling the old Google endpoint.
+ * Kept for backward compatibility with
+ * existing callers.
  */
 async function getPhotoBytes() {
   return null;
 }
+
+// ============================================================
+// EXPORTS
+// ============================================================
 
 module.exports = {
   getNearbyHotels,
