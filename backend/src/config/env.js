@@ -9,8 +9,17 @@ const dotenv = require('dotenv');
  * - development/production -> .env
  * - test -> .env.test
  */
-const envFile = process.env.NODE_ENV === 'test' ? '.env.test' : '.env';
-const envPath = path.join(__dirname, '..', '..', envFile);
+const envFile =
+  process.env.NODE_ENV === 'test'
+    ? '.env.test'
+    : '.env';
+
+const envPath = path.join(
+  __dirname,
+  '..',
+  '..',
+  envFile
+);
 
 if (fs.existsSync(envPath)) {
   dotenv.config({ path: envPath });
@@ -61,9 +70,11 @@ module.exports = {
   // Application
   // ============================================================
 
-  nodeEnv: process.env.NODE_ENV || 'development',
+  nodeEnv:
+    process.env.NODE_ENV || 'development',
 
-  port: parseInt(process.env.PORT || '5000', 10),
+  port:
+    parseInt(process.env.PORT || '5000', 10),
 
   frontendUrl:
     process.env.FRONTEND_URL ||
@@ -74,9 +85,11 @@ module.exports = {
   // ============================================================
 
   db: {
-    url: required('DATABASE_URL'),
+    url:
+      required('DATABASE_URL'),
 
-    ssl: process.env.PG_SSL === 'true',
+    ssl:
+      process.env.PG_SSL === 'true',
   },
 
   // ============================================================
@@ -84,15 +97,17 @@ module.exports = {
   // ============================================================
 
   jwt: {
-    accessSecret: requiredInProduction(
-      'JWT_ACCESS_SECRET',
-      'dev_access_secret_change_me'
-    ),
+    accessSecret:
+      requiredInProduction(
+        'JWT_ACCESS_SECRET',
+        'dev_access_secret_change_me'
+      ),
 
-    refreshSecret: requiredInProduction(
-      'JWT_REFRESH_SECRET',
-      'dev_refresh_secret_change_me'
-    ),
+    refreshSecret:
+      requiredInProduction(
+        'JWT_REFRESH_SECRET',
+        'dev_refresh_secret_change_me'
+      ),
 
     accessExpires:
       process.env.JWT_ACCESS_EXPIRES || '15m',
@@ -202,10 +217,13 @@ module.exports = {
   // ============================================================
   // Places
   // ============================================================
+  //
+  // Google Places has been replaced by Geoapify.
+  //
 
   places: {
     apiKey:
-      process.env.GOOGLE_PLACES_API_KEY,
+      process.env.GEOAPIFY_API_KEY,
 
     cacheTtlHours:
       parseInt(

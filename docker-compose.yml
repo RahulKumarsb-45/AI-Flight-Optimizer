@@ -143,6 +143,13 @@ services:
       GOOGLE_CALLBACK_URL: http://localhost:5000/api/auth/google/callback
 
       # =========================
+      # Geoapify Places
+      # =========================
+
+      GEOAPIFY_API_KEY: test_fake_geoapify_key
+      PLACES_CACHE_TTL_HOURS: 24
+
+      # =========================
       # Razorpay
       # =========================
 
@@ -257,10 +264,10 @@ services:
       OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY:-}
 
       # =========================
-      # Google Places
+      # Geoapify Places
       # =========================
 
-      GOOGLE_PLACES_API_KEY: ${GOOGLE_PLACES_API_KEY:-}
+      GEOAPIFY_API_KEY: ${GEOAPIFY_API_KEY:-}
       PLACES_CACHE_TTL_HOURS: ${PLACES_CACHE_TTL_HOURS:-24}
 
       # =========================
