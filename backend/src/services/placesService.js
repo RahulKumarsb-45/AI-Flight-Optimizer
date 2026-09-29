@@ -5,55 +5,52 @@ const { placesCache } = require('../cache/memoryCache');
 const redisCache = require('../cache/redisCache');
 const logger = require('../logger/logger');
 
-const REDIS_NAMESPACE = 'placescache-v2-dummy-images';
+// ============================================================
+// CACHE
+// ============================================================
+
+const REDIS_NAMESPACE = 'placescache-v4-local-images';
+
+// Same request already running ho to duplicate Geoapify request
+// nahi bhejenge.
+const inFlightRequests = new Map();
 
 function redisKeyFor(cacheKey) {
   return `${REDIS_NAMESPACE}:${cacheKey}`;
 }
 
-/**
- * Two-layer cache:
- * 1. In-memory cache
- * 2. Redis cache
- *
- * Redis hit backfills memory.
- */
 async function getFromCache(cacheKey, ttlMs) {
-  const memHit = placesCache.get(cacheKey);
+  const memoryValue = placesCache.get(cacheKey);
 
-  if (memHit) {
-    return memHit;
+  if (memoryValue) {
+    return memoryValue;
   }
 
-  const redisResult = await redisCache.get(
+  const redisValue = await redisCache.get(
     redisKeyFor(cacheKey)
   );
 
-  if (redisResult) {
+  if (redisValue) {
     placesCache.set(
       cacheKey,
-      redisResult,
+      redisValue,
       ttlMs
     );
 
-    return redisResult;
+    return redisValue;
   }
 
   return null;
 }
 
-/**
- * Write-through cache:
- * memory + Redis
- */
-function writeToCache(cacheKey, value, ttlMs) {
+async function writeToCache(cacheKey, value, ttlMs) {
   placesCache.set(
     cacheKey,
     value,
     ttlMs
   );
 
-  redisCache.set(
+  await redisCache.set(
     redisKeyFor(cacheKey),
     value,
     ttlMs
@@ -77,46 +74,76 @@ const DEFAULT_RADIUS_METERS = 5000;
 const ATTRACTIONS_RADIUS_METERS = 10000;
 
 // ============================================================
-// LOCAL DUMMY IMAGES
+// LOCAL IMAGES
 // ============================================================
 
-const DUMMY_IMAGE_COUNT = 10;
+const LOCAL_IMAGE_COUNT = 10;
 
-const DUMMY_IMAGE_PATHS = {
-  hotel: Array.from(
-    { length: DUMMY_IMAGE_COUNT },
-    (_, index) =>
-      `/images/hotels/hotel-${index + 1}.jpg`
-  ),
-
-  restaurant: Array.from(
-    { length: DUMMY_IMAGE_COUNT },
-    (_, index) =>
-      `/images/restaurants/restaurant-${index + 1}.jpg`
-  ),
+// Country image sets:
+//
+// 1 = Australia
+// 2 = Japan
+// 3 = New Zealand
+// 4 = Singapore
+//
+const COUNTRY_IMAGE_INDEX = {
+  au: 1,
+  jp: 2,
+  nz: 3,
+  sg: 4,
 };
 
-/**
- * Return a different local image for each result.
- *
- * Hotel:
- * /images/hotels/hotel-1.jpg ... hotel-10.jpg
- *
- * Restaurant:
- * /images/restaurants/restaurant-1.jpg ... restaurant-10.jpg
- */
-function getDummyImageUrl(imageType, index) {
-  const images = DUMMY_IMAGE_PATHS[imageType];
+// Agar koi doosra country ho jiske liye
+// dedicated image set nahi hai, Australia set
+// fallback ke roop mein use hoga.
+// Isse broken image nahi aayegi.
+const FALLBACK_COUNTRY_IMAGE_INDEX = 1;
 
-  if (!images || images.length === 0) {
+const LOCAL_IMAGE_PATHS = {
+  hotel: (countryIndex, imageIndex) =>
+    `/images/hotels/hotel-${countryIndex}-${imageIndex}.jpg`,
+
+  restaurant: (countryIndex, imageIndex) =>
+    `/images/restaurants/restaurant-${countryIndex}-${imageIndex}.jpg`,
+
+  attraction: (countryIndex, imageIndex) =>
+    `/images/things-to-do/thing-${countryIndex}-${imageIndex}.jpg`,
+};
+
+function getCountryImageIndex(countryCode) {
+  if (!countryCode) {
+    return FALLBACK_COUNTRY_IMAGE_INDEX;
+  }
+
+  const normalizedCode =
+    String(countryCode).trim().toLowerCase();
+
+  return (
+    COUNTRY_IMAGE_INDEX[normalizedCode] ||
+    FALLBACK_COUNTRY_IMAGE_INDEX
+  );
+}
+
+function getLocalImageUrl(
+  imageType,
+  countryIndex,
+  resultIndex
+) {
+  if (!LOCAL_IMAGE_PATHS[imageType]) {
     return null;
   }
 
-  return images[index % images.length];
+  const imageIndex =
+    (resultIndex % LOCAL_IMAGE_COUNT) + 1;
+
+  return LOCAL_IMAGE_PATHS[imageType](
+    countryIndex,
+    imageIndex
+  );
 }
 
 // ============================================================
-// PLACES CONFIG
+// API KEY
 // ============================================================
 
 function requireApiKey() {
@@ -129,9 +156,10 @@ function requireApiKey() {
   }
 }
 
-/**
- * Geoapify categories corresponding to our application needs.
- */
+// ============================================================
+// PLACE CATEGORIES
+// ============================================================
+
 const PLACE_CATEGORIES = {
   hotels: [
     'accommodation.hotel',
@@ -153,10 +181,10 @@ const PLACE_CATEGORIES = {
   ],
 };
 
-/**
- * Convert Geoapify place properties into
- * the application's normalized place shape.
- */
+// ============================================================
+// NORMALIZE PLACE
+// ============================================================
+
 function normalizePlace(properties) {
   if (!properties) {
     return {
@@ -169,6 +197,7 @@ function normalizePlace(properties) {
       openNow: null,
       mapsUri: null,
       location: null,
+      countryCode: null,
       photoName: null,
       imageUrl: null,
     };
@@ -221,7 +250,6 @@ function normalizePlace(properties) {
       properties.open_now ??
       null,
 
-    // Google Maps search URL
     mapsUri:
       lat !== null && lon !== null
         ? `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`
@@ -235,26 +263,21 @@ function normalizePlace(properties) {
           }
         : null,
 
-    // Filled later with local dummy image.
+    countryCode:
+      properties.country_code ||
+      properties.datasource?.raw?.country_code ||
+      null,
+
     photoName: null,
 
-    // Filled later with local dummy image.
     imageUrl: null,
   };
 }
 
 // ============================================================
-// GEOAPIFY NEARBY SEARCH
+// GEOAPIFY SEARCH
 // ============================================================
 
-/**
- * Search nearby places using Geoapify.
- *
- * imageType:
- * - hotel
- * - restaurant
- * - null for attractions
- */
 async function searchNearby({
   lat,
   lon,
@@ -266,16 +289,14 @@ async function searchNearby({
 }) {
   requireApiKey();
 
-  /**
-   * v2 is intentional.
-   *
-   * It prevents old cached responses containing
-   * previous image values from being reused.
-   */
+  // New cache version.
   const cacheKey =
-    `${cacheKeyPrefix}:v2:` +
-    `${lat.toFixed(3)},` +
-    `${lon.toFixed(3)}`;
+    `${cacheKeyPrefix}:v4-local-images:` +
+    `${lat.toFixed(3)},${lon.toFixed(3)}`;
+
+  // ==========================================================
+  // 1. MEMORY / REDIS CACHE
+  // ==========================================================
 
   const cached = await getFromCache(
     cacheKey,
@@ -286,110 +307,162 @@ async function searchNearby({
     return cached;
   }
 
-  try {
-    // ========================================================
-    // 1. GET PLACES FROM GEOAPIFY
-    // ========================================================
+  // ==========================================================
+  // 2. PREVENT DUPLICATE REQUESTS
+  // ==========================================================
 
-    const response = await axios.get(
-      BASE_URL,
-      {
-        params: {
-          categories: categories.join(','),
+  const existingRequest =
+    inFlightRequests.get(cacheKey);
 
-          filter:
-            `circle:${lon},${lat},${radiusMeters}`,
+  if (existingRequest) {
+    return existingRequest;
+  }
 
-          bias:
-            `proximity:${lon},${lat}`,
+  // ==========================================================
+  // 3. CREATE ONE REQUEST
+  // ==========================================================
 
-          limit: Math.min(
-            maxResults,
-            20
-          ),
+  const requestPromise = (async () => {
+    try {
+      // ======================================================
+      // GEOAPIFY CALL
+      //
+      // IMPORTANT:
+      // This is the ONLY external API call here.
+      // No Foursquare / Google image API is called.
+      // ======================================================
 
-          apiKey:
-            config.places.apiKey,
-        },
+      const response = await axios.get(
+        BASE_URL,
+        {
+          params: {
+            categories:
+              categories.join(','),
 
-        timeout: 10000,
-      }
-    );
+            filter:
+              `circle:${lon},${lat},${radiusMeters}`,
 
-    const features =
-      response.data?.features || [];
+            bias:
+              `proximity:${lon},${lat}`,
 
-    const results =
-      features
-        .map(
-          (feature) =>
-            normalizePlace(
-              feature.properties
-            )
-        )
-        .filter(
-          (place) =>
-            place.name
-        )
-        .slice(
-          0,
-          maxResults
-        );
+            limit: Math.min(
+              maxResults,
+              20
+            ),
 
-    // ========================================================
-    // 2. ADD LOCAL DUMMY IMAGES
-    // ========================================================
+            apiKey:
+              config.places.apiKey,
+          },
 
-    const finalResults =
-      results.map(
-        (place, index) => {
-          const dummyImage =
-            getDummyImageUrl(
-              imageType,
-              index
-            );
-
-          return {
-            ...place,
-
-            // Frontend currently reads photoName.
-            photoName: dummyImage,
-
-            // Keep imageUrl too for compatibility
-            // with any other existing callers.
-            imageUrl: dummyImage,
-          };
+          timeout: 10000,
         }
       );
 
-    // ========================================================
-    // 3. CACHE COMPLETE RESULT
-    // ========================================================
+      const features =
+        response.data?.features || [];
 
-    writeToCache(
-      cacheKey,
-      finalResults,
-      CACHE_TTL_MS
-    );
+      // ======================================================
+      // NORMALIZE PLACES
+      // ======================================================
 
-    return finalResults;
+      const results =
+        features
+          .map(
+            (feature) =>
+              normalizePlace(
+                feature.properties
+              )
+          )
+          .filter(
+            (place) =>
+              place.name
+          )
+          .slice(
+            0,
+            maxResults
+          );
 
-  } catch (err) {
-    const status =
-      err.response?.status;
+      // ======================================================
+      // ADD LOCAL IMAGES
+      //
+      // NO API CALL HERE.
+      // These are files from frontend/public/images.
+      // ======================================================
 
-    const providerMessage =
-      err.response?.data?.message ||
-      err.response?.data?.error ||
-      err.message;
+      const finalResults =
+        results.map(
+          (place, index) => {
+            const countryIndex =
+              getCountryImageIndex(
+                place.countryCode
+              );
 
-    if (
-      status === 401 ||
-      status === 403
-    ) {
+            const localImage =
+              getLocalImageUrl(
+                imageType,
+                countryIndex,
+                index
+              );
+
+            return {
+              ...place,
+
+              photoName:
+                localImage,
+
+              imageUrl:
+                localImage,
+            };
+          }
+        );
+
+      // ======================================================
+      // SAVE RESULT TO BOTH CACHES
+      // ======================================================
+
+      await writeToCache(
+        cacheKey,
+        finalResults,
+        CACHE_TTL_MS
+      );
+
+      return finalResults;
+
+    } catch (err) {
+      const status =
+        err.response?.status;
+
+      const providerMessage =
+        err.response?.data?.message ||
+        err.response?.data?.error ||
+        err.message;
+
+      if (
+        status === 401 ||
+        status === 403
+      ) {
+        logger.warn(
+          'Geoapify Places authentication failed',
+          {
+            status,
+            error:
+              providerMessage,
+          }
+        );
+
+        throw new AppError(
+          'Geoapify API key is invalid or not authorized.',
+          502,
+          'PLACES_PROVIDER_ERROR'
+        );
+      }
+
       logger.warn(
-        'Geoapify Places authentication failed',
+        'Geoapify nearby search failed',
         {
+          lat,
+          lon,
+          categories,
           status,
           error:
             providerMessage,
@@ -397,28 +470,25 @@ async function searchNearby({
       );
 
       throw new AppError(
-        'Geoapify API key is invalid or not authorized.',
+        'Could not fetch nearby places right now.',
         502,
         'PLACES_PROVIDER_ERROR'
       );
     }
+  })();
 
-    logger.warn(
-      'Geoapify nearby search failed',
-      {
-        lat,
-        lon,
-        categories,
-        status,
-        error:
-          providerMessage,
-      }
-    );
+  // Register immediately so another identical request
+  // gets the same Promise.
+  inFlightRequests.set(
+    cacheKey,
+    requestPromise
+  );
 
-    throw new AppError(
-      'Could not fetch nearby places right now.',
-      502,
-      'PLACES_PROVIDER_ERROR'
+  try {
+    return await requestPromise;
+  } finally {
+    inFlightRequests.delete(
+      cacheKey
     );
   }
 }
@@ -427,9 +497,6 @@ async function searchNearby({
 // HOTELS
 // ============================================================
 
-/**
- * Hotels / accommodation.
- */
 async function getNearbyHotels({
   lat,
   lon,
@@ -459,9 +526,6 @@ async function getNearbyHotels({
 // RESTAURANTS
 // ============================================================
 
-/**
- * Restaurants / cafes / fast food.
- */
 async function getNearbyRestaurants({
   lat,
   lon,
@@ -491,13 +555,6 @@ async function getNearbyRestaurants({
 // TOURIST ATTRACTIONS
 // ============================================================
 
-/**
- * Tourist attractions.
- *
- * No local attraction images are assigned because
- * the current image folders contain hotel and
- * restaurant image sets.
- */
 async function getTouristAttractions({
   lat,
   lon,
@@ -519,7 +576,7 @@ async function getTouristAttractions({
       10,
 
     imageType:
-      null,
+      'attraction',
   });
 }
 
@@ -527,10 +584,6 @@ async function getTouristAttractions({
 // BACKWARD COMPATIBILITY
 // ============================================================
 
-/**
- * Kept for backward compatibility with
- * existing callers.
- */
 async function getPhotoBytes() {
   return null;
 }
