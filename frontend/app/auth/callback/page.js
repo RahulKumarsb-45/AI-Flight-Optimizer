@@ -3,19 +3,26 @@
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { PageSpinner } from '@/components/ui/Spinner';
+import { useAuth } from '@/hooks/useAuth';
 import { trackLogin } from '@/lib/analytics';
 
 export default function OAuthCallbackPage() {
   const router = useRouter();
+  const { user, loading } = useAuth();
 
   useEffect(() => {
-    // Google OAuth has already been completed by the backend.
-    // Do NOT call /auth/refresh here.
-    // AuthProvider will handle the session refresh on the home page.
-    trackLogin({ method: 'oauth' });
+    // AuthProvider handles the session refresh.
+    // Do NOT call /auth/refresh from this page.
 
-    router.replace('/');
-  }, [router]);
+    if (loading) return;
+
+    if (user) {
+      trackLogin({ method: 'oauth' });
+      router.replace('/');
+    } else {
+      router.replace('/login?error=oauth_failed');
+    }
+  }, [loading, user, router]);
 
   return <PageSpinner label="Finishing sign-in..." />;
 }
