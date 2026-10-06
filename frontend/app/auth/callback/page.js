@@ -3,29 +3,48 @@
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { PageSpinner } from '@/components/ui/Spinner';
-import { useAuth } from '@/hooks/useAuth';
+import { authService } from '@/services/authService';
 import { trackLogin } from '@/lib/analytics';
 
 export default function OAuthCallbackPage() {
   const router = useRouter();
-  const { user, loading } = useAuth();
 
   useEffect(() => {
-    // Wait for AuthProvider to restore the session.
-    if (loading) {
-      return;
-    }
+    let cancelled = false;
 
-    // Session restored successfully.
-    if (user) {
-      trackLogin({ method: 'oauth' });
-      router.replace('/');
-      return;
-    }
+    const finishOAuth = async () => {
+      try {
+        // The backend has already created the refresh-token cookie.
+        // Refresh once to obtain the access token.
+        const token = await authService.silentRefresh();
 
-    // OAuth callback completed but session could not be restored.
-    router.replace('/login?error=oauth_failed');
-  }, [loading, user, router]);
+        if (!token) {
+          throw new Error('Unable to restore authentication session');
+        }
+
+        // Verify that the authenticated user can be loaded.
+        await authService.me();
+
+        if (cancelled) return;
+
+        trackLogin({ method: 'oauth' });
+
+        router.replace('/');
+      } catch (error) {
+        console.error('OAuth callback failed:', error);
+
+        if (!cancelled) {
+          router.replace('/login?error=oauth_failed');
+        }
+      }
+    };
+
+    finishOAuth();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   return <PageSpinner label="Finishing sign-in..." />;
 }
