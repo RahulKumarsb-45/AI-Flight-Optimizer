@@ -11,17 +11,20 @@ export default function OAuthCallbackPage() {
   const { user, loading } = useAuth();
 
   useEffect(() => {
-    // AuthProvider handles the session refresh.
-    // Do NOT call /auth/refresh from this page.
+    // Wait for AuthProvider to restore the session.
+    if (loading) {
+      return;
+    }
 
-    if (loading) return;
-
+    // Session restored successfully.
     if (user) {
       trackLogin({ method: 'oauth' });
       router.replace('/');
-    } else {
-      router.replace('/login?error=oauth_failed');
+      return;
     }
+
+    // OAuth callback completed but session could not be restored.
+    router.replace('/login?error=oauth_failed');
   }, [loading, user, router]);
 
   return <PageSpinner label="Finishing sign-in..." />;
