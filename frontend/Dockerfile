@@ -15,23 +15,12 @@ COPY . .
 # this is a Next.js constraint, not something a runtime .env can work around.
 ARG NEXT_PUBLIC_API_URL=http://localhost:5000/api
 ARG NEXT_PUBLIC_MAPBOX_TOKEN=
-ARG NEXT_PUBLIC_SENTRY_DSN=
 ARG NEXT_PUBLIC_GA_MEASUREMENT_ID=
+
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_MAPBOX_TOKEN=$NEXT_PUBLIC_MAPBOX_TOKEN
-ENV NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN
 ENV NEXT_PUBLIC_GA_MEASUREMENT_ID=$NEXT_PUBLIC_GA_MEASUREMENT_ID
 ENV NEXT_TELEMETRY_DISABLED=1
-
-# Build-time only (never becomes a runtime env var — this stage isn't
-# copied into the runner). Lets CI upload source maps to Sentry; if unset,
-# the Sentry webpack plugin just skips the upload step silently.
-ARG SENTRY_AUTH_TOKEN=
-ENV SENTRY_AUTH_TOKEN=$SENTRY_AUTH_TOKEN
-ARG SENTRY_ORG=
-ENV SENTRY_ORG=$SENTRY_ORG
-ARG SENTRY_PROJECT=
-ENV SENTRY_PROJECT=$SENTRY_PROJECT
 
 RUN npm run build
 

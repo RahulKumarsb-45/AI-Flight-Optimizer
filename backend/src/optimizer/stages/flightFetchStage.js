@@ -4,24 +4,44 @@ const config = require('../../config/env');
 const logger = require('../../logger/logger');
 
 /**
- * PRACTICAL FETCH CAP: MAX_PERMUTATIONS (default 500) bounds how many
- * candidate itineraries we're willing to CONSIDER, but actually calling a
- * flight provider 500 times per search would be slow and (for Amadeus)
- * expensive. So after the permutation cap, we take only the best-ranked
- * `MAX_FLIGHT_FETCHES` candidates (by the same flexScore/airportPenalty
- * pre-ranking) and fetch real offers for those. This is a deliberate,
- * documented second cap — not a silent shortcut.
+ * Maximum number of candidate itineraries that can be validated
+ * against the real flight provider in one optimization request.
+ *
+ * We do NOT validate all 500 capped candidates because that can create
+ * excessive provider/API load.
+ *
+ * 200 gives later multi-country permutations a fair chance while
+ * keeping provider usage bounded.
  */
-const MAX_FLIGHT_FETCHES = 20;
+const MAX_FLIGHT_FETCHES = Number.parseInt(
+  process.env.MAX_FLIGHT_FETCHES || '200',
+  10
+);
 
 /**
- * True when a candidate's legs are a simple there-and-back pair for ONE
- * destination (single-destination round trip) rather than a one-way or a
- * multi-city circuit. Multi-city candidates always have 3+ legs (each
- * destination country plus the return to origin — see
- * permutationGenerator.buildMultiCountryCandidates), so this never
- * misfires on a circuit; it only matches the exact shape
- * buildSingleDestinationCandidates produces for a round trip.
+ * Number of candidates processed concurrently in one batch.
+ *
+ * This prevents a large Promise.all() from creating an uncontrolled
+ * burst of provider requests.
+ */
+const FLIGHT_FETCH_BATCH_SIZE = Number.parseInt(
+  process.env.FLIGHT_FETCH_BATCH_SIZE || '20',
+  10
+);
+
+/**
+ * TOP_N_RECOMMENDATIONS in optimizerService is 5.
+ *
+ * Once we have 5 real valid itineraries there is normally no reason
+ * to keep consuming provider quota.
+ */
+const MIN_VALID_RECOMMENDATIONS = 5;
+
+/**
+ * True when a candidate's legs are a simple there-and-back pair for
+ * ONE destination.
+ *
+ * Multi-country circuits always have 3+ legs.
  */
 function isRoundTripPair(legs) {
   return (
@@ -32,105 +52,107 @@ function isRoundTripPair(legs) {
 }
 
 function sumSegmentDurations(segments) {
-  return (segments || []).reduce((sum, seg) => sum + (seg.durationMinutes || 0), 0);
+  return (segments || []).reduce(
+    (sum, seg) => sum + (seg.durationMinutes || 0),
+    0
+  );
 }
 
 /**
- * Splits ONE real, combined round-trip offer (as returned by a provider's
- * search({ returnDate }) — see FlightProviderContract.js and, for Ignav
- * specifically, ignavProvider.js's POST /fares/round-trip mapping) into the
- * two per-leg "view" objects the existing UI/response shape expects
- * (RecommendationCard.jsx, tripTimeline.js render one offer per displayed
- * leg, via `legOffers[legIndex]`).
+ * Split one real combined round-trip offer into two display views.
  *
- * This is a VIEW split only — never a price split. Ignav (like Amadeus and
- * the mock provider) prices a round trip as ONE combined fare; there is no
- * real, separate "just the outbound" or "just the inbound" amount to
- * report. So the entire real total stays on the outbound view, and the
- * inbound view's priceInr is left null — formatInr() renders that as "—"
- * in the UI — rather than inventing a per-direction split that was never
- * actually quoted. Duration/stops, unlike price, ARE genuinely knowable
- * per direction (each segment already carries its own durationMinutes), so
- * those are computed for real from each direction's own segments rather
- * than approximated.
+ * IMPORTANT:
+ * This does NOT split the actual fare.
+ * The real combined price remains on the outbound view.
  */
 function splitRoundTripOfferForDisplay(offer) {
   const outboundView = {
     ...offer,
     id: `${offer.id}_outbound`,
-    totalDurationMinutes: sumSegmentDurations(offer.outbound),
-    stops: Math.max((offer.outbound || []).length - 1, 0),
+    totalDurationMinutes: sumSegmentDurations(
+      offer.outbound
+    ),
+    stops: Math.max(
+      (offer.outbound || []).length - 1,
+      0
+    ),
     inbound: null,
   };
+
   const inboundView = {
     ...offer,
     id: `${offer.id}_inbound`,
-    priceInr: null, // no separate inbound fare exists — see doc comment above
-    totalDurationMinutes: sumSegmentDurations(offer.inbound),
-    stops: Math.max((offer.inbound || []).length - 1, 0),
-    outbound: offer.inbound, // display components read `offer.outbound` as "this leg's segments"
+    priceInr: null,
+    totalDurationMinutes: sumSegmentDurations(
+      offer.inbound
+    ),
+    stops: Math.max(
+      (offer.inbound || []).length - 1,
+      0
+    ),
+    outbound: offer.inbound,
     inbound: null,
   };
+
   return [outboundView, inboundView];
 }
 
 /**
- * Fetches offers (or returns) offers for a single leg's params, de-duplicating
- * concurrent requests for the exact same leg (same route/date/adults/
- * cabinClass/provider) so that when multiple candidates share a leg —
- * common with flexible dates / nearby airports — only one cache lookup
- * and, on a miss, one provider call happens for it, with every caller
- * awaiting the same in-flight promise. This preserves the sequential
- * implementation's effective behavior (a shared leg is fetched once and
- * reused) once fetches are parallelized; without it, concurrent identical
- * cache-miss lookups could race and issue duplicate provider calls.
+ * Fetch offers for one exact flight-leg request.
  *
- * `inFlight` is scoped to a single `fetchFlightsForCandidates` call, so
- * this never causes offers to be reused *across* separate searches — that
- * cross-request reuse is still governed entirely by flightCache's own TTL
- * semantics, untouched here.
+ * Uses:
+ * 1. Memory cache
+ * 2. Redis cache
+ * 3. Provider
+ *
+ * Also de-duplicates identical requests that are running
+ * simultaneously.
  */
 function getOrFetchLegOffers(params, inFlight) {
   const key = flightCache.buildCacheKey(params);
+
   if (!inFlight.has(key)) {
     const promise = (async () => {
       let offers = await flightCache.getCached(params);
+
       if (!offers) {
-        offers = await providerFactory.searchWithFallback(params);
-        await flightCache.setCached(params, offers);
+        offers =
+          await providerFactory.searchWithFallback(
+            params
+          );
+
+        await flightCache.setCached(
+          params,
+          offers
+        );
       }
+
       return offers;
     })().finally(() => {
-      // Only clear the entry if it's still the one we set (defensive;
-      // in practice nothing overwrites it before this runs).
       if (inFlight.get(key) === promise) {
         inFlight.delete(key);
       }
     });
+
     inFlight.set(key, promise);
   }
+
   return inFlight.get(key);
 }
 
 /**
- * Fetches a single-destination round trip as ONE combined search
- * (originIata/destinationIata/departureDate + returnDate), matching
- * FlightProviderContract.js's documented interface and how mockProvider/
- * amadeusProvider already implement it. This is what makes
- * FLIGHT_PROVIDER=ignav actually reach Ignav's real POST
- * /fares/round-trip endpoint — previously this stage always issued two
- * independent one-way searches (outbound leg, inbound leg) and summed
- * their prices instead, which meant a real combined round-trip fare (and
- * any round-trip-specific pricing) was never actually requested from any
- * provider, Ignav included.
- *
- * totalPriceInr/totalDurationMinutes/totalStops come straight from the
- * provider's own single combined offer — never re-derived from the split
- * display views below, so a real round-trip total is never approximated
- * or re-summed.
+ * Fetch a single-destination round trip as ONE combined
+ * real provider search.
  */
-async function fetchRoundTripCandidate(candidate, { adults, cabinClass, inFlight }) {
-  const [outboundLeg, inboundLeg] = candidate.legs;
+async function fetchRoundTripCandidate(
+  candidate,
+  { adults, cabinClass, inFlight }
+) {
+  const [
+    outboundLeg,
+    inboundLeg,
+  ] = candidate.legs;
+
   const params = {
     originIata: outboundLeg.fromIata,
     destinationIata: outboundLeg.toIata,
@@ -141,117 +163,531 @@ async function fetchRoundTripCandidate(candidate, { adults, cabinClass, inFlight
     provider: config.flightProvider,
   };
 
-  const offers = (await getOrFetchLegOffers(params, inFlight)).slice(0, 5); // keep top 5 real round-trip offers for scoring flexibility
+  const offers = (
+    await getOrFetchLegOffers(
+      params,
+      inFlight
+    )
+  ).slice(0, 5);
+
   if (offers.length === 0) {
-    return null; // no real round-trip offers found — drop this candidate, never substitute anything
+    return null;
   }
 
-  const cheapest = offers[0]; // providers sort cheapest-first already
-  const legOffers = [[], []];
+  const cheapest = offers[0];
+
+  const legOffers = [
+    [],
+    [],
+  ];
+
   offers.forEach((offer) => {
-    const [outboundView, inboundView] = splitRoundTripOfferForDisplay(offer);
-    legOffers[0].push(outboundView);
-    legOffers[1].push(inboundView);
+    const [
+      outboundView,
+      inboundView,
+    ] = splitRoundTripOfferForDisplay(
+      offer
+    );
+
+    legOffers[0].push(
+      outboundView
+    );
+
+    legOffers[1].push(
+      inboundView
+    );
   });
 
   return {
     ...candidate,
     legOffers,
-    totalPriceInr: cheapest.priceInr,
-    totalDurationMinutes: cheapest.totalDurationMinutes,
-    totalStops: cheapest.stops,
+
+    totalPriceInr:
+      cheapest.priceInr,
+
+    totalDurationMinutes:
+      cheapest.totalDurationMinutes,
+
+    totalStops:
+      cheapest.stops,
   };
 }
 
 /**
- * Fetches offers for every leg of one candidate (in parallel, since legs of
- * the same candidate are independent of each other) and derives the same
- * enriched-candidate shape the previous sequential implementation produced.
- * Returns `null` for anything the old code used to silently drop (a
- * missing offer on some leg, or a thrown error) so the caller can filter
- * it out while preserving candidate order.
+ * Fetch every leg of one candidate.
  *
- * A single-destination round trip (see isRoundTripPair) is delegated to
- * fetchRoundTripCandidate for a real combined-fare fetch; everything else
- * (one-way, and multi-city circuits of 3+ legs) keeps the exact per-leg
- * fetch-and-sum behavior this function always had — one-way is completely
- * unaffected by this change.
+ * A multi-country candidate is considered valid ONLY when
+ * every leg has at least one real flight offer.
  */
-async function fetchOneCandidate(candidate, { adults, cabinClass, inFlight }) {
+async function fetchOneCandidate(
+  candidate,
+  { adults, cabinClass, inFlight }
+) {
   try {
-    if (isRoundTripPair(candidate.legs)) {
-      return await fetchRoundTripCandidate(candidate, { adults, cabinClass, inFlight });
-    }
-
-    const legOffers = await Promise.all(
-      candidate.legs.map(async (leg) => {
-        const params = {
-          originIata: leg.fromIata,
-          destinationIata: leg.toIata,
-          departureDate: leg.date,
+    if (
+      isRoundTripPair(
+        candidate.legs
+      )
+    ) {
+      return await fetchRoundTripCandidate(
+        candidate,
+        {
           adults,
           cabinClass,
-          provider: config.flightProvider,
-        };
-        const offers = await getOrFetchLegOffers(params, inFlight);
-        return offers.slice(0, 5); // keep top 5 cheapest per leg for scoring flexibility
-      })
-    );
+          inFlight,
+        }
+      );
+    }
 
-    const cheapestPerLeg = legOffers.map((offers) => offers[0]).filter(Boolean);
-    if (cheapestPerLeg.length !== candidate.legs.length) {
-      return null; // couldn't find offers for at least one leg — drop this candidate
+    const legOffers =
+      await Promise.all(
+        candidate.legs.map(
+          async (leg) => {
+            const params = {
+              originIata:
+                leg.fromIata,
+
+              destinationIata:
+                leg.toIata,
+
+              departureDate:
+                leg.date,
+
+              adults,
+              cabinClass,
+              provider:
+                config.flightProvider,
+            };
+
+            const offers =
+              await getOrFetchLegOffers(
+                params,
+                inFlight
+              );
+
+            return offers.slice(
+              0,
+              5
+            );
+          }
+        )
+      );
+
+    const cheapestPerLeg =
+      legOffers
+        .map(
+          (offers) =>
+            offers[0]
+        )
+        .filter(Boolean);
+
+    /**
+     * If even ONE leg has no real flight,
+     * this complete itinerary is invalid.
+     */
+    if (
+      cheapestPerLeg.length !==
+      candidate.legs.length
+    ) {
+      return null;
     }
 
     return {
       ...candidate,
+
       legOffers,
-      totalPriceInr: cheapestPerLeg.reduce((sum, o) => sum + o.priceInr, 0),
-      totalDurationMinutes: cheapestPerLeg.reduce((sum, o) => sum + o.totalDurationMinutes, 0),
-      totalStops: cheapestPerLeg.reduce((sum, o) => sum + o.stops, 0),
+
+      totalPriceInr:
+        cheapestPerLeg.reduce(
+          (sum, offer) =>
+            sum + offer.priceInr,
+          0
+        ),
+
+      totalDurationMinutes:
+        cheapestPerLeg.reduce(
+          (sum, offer) =>
+            sum +
+            offer.totalDurationMinutes,
+          0
+        ),
+
+      totalStops:
+        cheapestPerLeg.reduce(
+          (sum, offer) =>
+            sum + offer.stops,
+          0
+        ),
     };
   } catch (err) {
-    logger.warn('Skipping candidate due to fetch error', { legs: candidate.legs, error: err.message });
+    logger.warn(
+      'Skipping candidate due to fetch error',
+      {
+        legs:
+          candidate?.legs,
+        error:
+          err.message,
+      }
+    );
+
     return null;
   }
 }
 
 /**
- * Fetches flight offers for every leg of every candidate itinerary.
+ * Create a route signature for a candidate.
  *
- * Returns candidates enriched with `legOffers: NormalizedFlightOffer[][]`
- * (best few offers per leg) and computed totals. For one-way and
- * multi-city candidates, totals use the cheapest offer per independently-
- * fetched leg, exactly as before. For a single-destination round trip,
- * the whole candidate is fetched as ONE combined real fare (see
- * fetchRoundTripCandidate) and totals come straight from that fare —
- * pruning/scoring stages operate on this either way without needing to
- * know which path produced it.
+ * Example:
  *
- * Candidates are fetched concurrently rather than one-at-a-time: each
- * candidate's own fetch is wrapped in its own try/catch (as before, one
- * candidate's provider error only drops that candidate, nothing else) so
- * `Promise.all` here never rejects, and results are filtered afterwards —
- * `Promise.all` preserves input order in its output array, so the final
- * list has the same relative ordering as the old sequential loop would
- * have produced. The actual provider concurrency ceiling still comes from
- * amadeusProvider's existing internal cap (MAX_CONCURRENT_REQUESTS), so
- * this never bypasses that protection — it just stops needlessly
- * serializing calls that were already independent of one another.
+ * DEL -> SYD -> NRT -> AKL -> SIN -> DEL
+ *
+ * gets a different signature from:
+ *
+ * DEL -> NRT -> SYD -> AKL -> SIN -> DEL
+ *
+ * This prevents the old "first 20 candidates" problem where
+ * many candidates from the same route structure could consume
+ * the entire validation budget.
  */
-async function fetchFlightsForCandidates(candidates, { adults = 1, cabinClass = 'economy' } = {}) {
-  const toFetch = candidates.slice(0, MAX_FLIGHT_FETCHES);
-  const skipped = candidates.length - toFetch.length;
-  if (skipped > 0) {
-    logger.info('Flight fetch cap applied', { totalCandidates: candidates.length, fetched: toFetch.length, skipped });
+function getCandidateRouteKey(
+  candidate
+) {
+  if (
+    !candidate ||
+    !Array.isArray(
+      candidate.legs
+    )
+  ) {
+    return 'unknown';
   }
 
-  const inFlight = new Map();
-  const results = await Promise.all(
-    toFetch.map((candidate) => fetchOneCandidate(candidate, { adults, cabinClass, inFlight }))
-  );
-
-  return results.filter(Boolean);
+  return candidate.legs
+    .map(
+      (leg) =>
+        `${leg.fromIata || ''}-${leg.toIata || ''}`
+    )
+    .join('|');
 }
 
-module.exports = { fetchFlightsForCandidates, MAX_FLIGHT_FETCHES };
+/**
+ * Select candidates fairly across different route structures.
+ *
+ * Instead of:
+ *
+ * candidates.slice(0, 20)
+ *
+ * we group candidates by route and take them
+ * round-robin.
+ *
+ * This gives different country permutations a chance
+ * to reach the real flight provider.
+ */
+function selectCandidatesForValidation(
+  candidates,
+  limit
+) {
+  if (
+    !Array.isArray(candidates) ||
+    candidates.length === 0 ||
+    limit <= 0
+  ) {
+    return [];
+  }
+
+  if (
+    candidates.length <= limit
+  ) {
+    return candidates.slice();
+  }
+
+  const groups =
+    new Map();
+
+  for (
+    const candidate of candidates
+  ) {
+    const key =
+      getCandidateRouteKey(
+        candidate
+      );
+
+    if (!groups.has(key)) {
+      groups.set(
+        key,
+        []
+      );
+    }
+
+    groups
+      .get(key)
+      .push(candidate);
+  }
+
+  const selected = [];
+
+  const iterators =
+    Array.from(
+      groups.values()
+    ).map(
+      (group) => ({
+        group,
+        index: 0,
+      })
+    );
+
+  while (
+    selected.length <
+    limit
+  ) {
+    let addedThisRound =
+      false;
+
+    for (
+      const iterator of iterators
+    ) {
+      if (
+        iterator.index <
+          iterator.group.length &&
+        selected.length <
+          limit
+      ) {
+        selected.push(
+          iterator.group[
+            iterator.index
+          ]
+        );
+
+        iterator.index += 1;
+
+        addedThisRound =
+          true;
+      }
+    }
+
+    if (
+      !addedThisRound
+    ) {
+      break;
+    }
+  }
+
+  return selected;
+}
+
+/**
+ * Fetch flight offers in bounded batches.
+ *
+ * Important:
+ *
+ * - Does NOT only check first 20 candidates.
+ * - Maximum 200 candidates by default.
+ * - Only 20 candidates are processed concurrently.
+ * - Different route permutations are selected fairly.
+ * - Stops when 5 valid real itineraries are found.
+ * - If fewer than 5 exist, continues until the configured
+ *   validation limit is exhausted.
+ */
+async function fetchFlightsForCandidates(
+  candidates,
+  {
+    adults = 1,
+    cabinClass = 'economy',
+  } = {}
+) {
+  if (
+    !Array.isArray(candidates) ||
+    candidates.length === 0
+  ) {
+    return [];
+  }
+
+  const safeMaxFetches =
+    Number.isFinite(
+      MAX_FLIGHT_FETCHES
+    )
+      ? Math.max(
+          1,
+          MAX_FLIGHT_FETCHES
+        )
+      : 200;
+
+  const safeBatchSize =
+    Number.isFinite(
+      FLIGHT_FETCH_BATCH_SIZE
+    )
+      ? Math.max(
+          1,
+          FLIGHT_FETCH_BATCH_SIZE
+        )
+      : 20;
+
+  /**
+   * Select candidates from different route structures
+   * instead of blindly taking candidates 0..19.
+   */
+  const candidatesToFetch =
+    selectCandidatesForValidation(
+      candidates,
+      Math.min(
+        candidates.length,
+        safeMaxFetches
+      )
+    );
+
+  const skipped =
+    candidates.length -
+    candidatesToFetch.length;
+
+  if (skipped > 0) {
+    logger.info(
+      'Flight fetch cap applied',
+      {
+        totalCandidates:
+          candidates.length,
+
+        selectedForValidation:
+          candidatesToFetch.length,
+
+        skipped,
+
+        maxFlightFetches:
+          safeMaxFetches,
+
+        strategy:
+          'route-diverse-round-robin',
+      }
+    );
+  }
+
+  const inFlight =
+    new Map();
+
+  const validResults =
+    [];
+
+  /**
+   * Process candidates in batches.
+   */
+  for (
+    let start = 0;
+    start <
+    candidatesToFetch.length;
+    start += safeBatchSize
+  ) {
+    const batch =
+      candidatesToFetch.slice(
+        start,
+        start +
+          safeBatchSize
+      );
+
+    logger.info(
+      'Flight validation batch started',
+      {
+        batchStart:
+          start,
+
+        batchSize:
+          batch.length,
+
+        totalSelected:
+          candidatesToFetch.length,
+      }
+    );
+
+    const results =
+      await Promise.all(
+        batch.map(
+          (candidate) =>
+            fetchOneCandidate(
+              candidate,
+              {
+                adults,
+                cabinClass,
+                inFlight,
+              }
+            )
+        )
+      );
+
+    const successful =
+      results.filter(
+        Boolean
+      );
+
+    validResults.push(
+      ...successful
+    );
+
+    logger.info(
+      'Flight validation batch completed',
+      {
+        batchStart:
+          start,
+
+        batchSize:
+          batch.length,
+
+        successfulCandidates:
+          successful.length,
+
+        totalValidCandidates:
+          validResults.length,
+      }
+    );
+
+    /**
+     * We need 5 real candidates for the
+     * TOP_N_RECOMMENDATIONS = 5 stage.
+     *
+     * Stop here to avoid unnecessary provider usage.
+     */
+    if (
+      validResults.length >=
+      MIN_VALID_RECOMMENDATIONS
+    ) {
+      logger.info(
+        'Minimum real itinerary target reached',
+        {
+          validCandidates:
+            validResults.length,
+
+          batchesProcessed:
+            Math.ceil(
+              (start +
+                batch.length) /
+                safeBatchSize
+            ),
+        }
+      );
+
+      break;
+    }
+  }
+
+  logger.info(
+    'Flight candidate fetch completed',
+    {
+      provider:
+        config.flightProvider,
+
+      requestedCandidates:
+        candidatesToFetch.length,
+
+      successfulCandidates:
+        validResults.length,
+
+      droppedCandidates:
+        candidatesToFetch.length -
+        validResults.length,
+    }
+  );
+
+  return validResults;
+}
+
+module.exports = {
+  fetchFlightsForCandidates,
+  MAX_FLIGHT_FETCHES,
+  FLIGHT_FETCH_BATCH_SIZE,
+};
